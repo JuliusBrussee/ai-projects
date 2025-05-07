@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Village Builder</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; background-color: #333; color: #fff;}
+        #container { width: 100vw; height: 100vh; display: block; }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background-color: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 100;
+        }
+        #ui button, #ui select {
+            display: block;
+            margin-bottom: 5px;
+            padding: 8px;
+            background-color: #555;
+            color: white;
+            border: 1px solid #777;
+            cursor: pointer;
+            width: 150px;
+            text-align: left;
+        }
+        #ui button:hover, #ui select:hover {
+            background-color: #777;
+        }
+        #ui .selected-tool {
+            background-color: #007bff;
+            color: white;
+        }
+        #info {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: #fff;
+            background-color: rgba(0,0,0,0.5);
+            padding: 5px;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+    </style>
+
+    <!-- IMPORT MAP -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+</head>
+<body>
+    <div id="container"></div>
+    <div id="ui">
+        <h3>Tools</h3>
+        <button id="tool-place" class="selected-tool">Place Building</button>
+        <button id="tool-move">Move Building</button>
+        <button id="tool-delete">Delete Building</button>
+        <hr>
+        <h3>Buildings</h3>
+        <select id="building-selector">
+            <!-- Options will be populated by JavaScript -->
+        </select>
+        <hr>
+        <p>R: Rotate</p>
+        <p>Esc: Deselect/Cancel</p>
+        <p>Del/Backspace: Delete selected</p>
+    </div>
+    <div id="info">Loading... Please wait.</div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // --- Three.js Setup ---
+        let scene, camera, renderer, controls;
+        let raycaster, mouse;
+        const container = document.getElementById('container');
+
+        // --- Game State ---
+        const gridSize = 100; 
+        const cellSize = 5;   
+        const placedBuildings = [];
+        let ghostBuilding = null; // This will be a THREE.Group
+        let selectedBuilding = null; // This will be a THREE.Group
+        let currentBuildingType = 'house'; 
+        let currentRotation = 0; 
+        let currentTool = 'place';
+
+        // --- Building Definitions ---
+        const buildingTypes = {
+            'house': {
+                name: 'House (1x1)',
+                size: { w: 1, h: 1.5, d: 1 }, 
+                color: 0xcc6666, // Default color for the main body
+                createGeometry: (w_world, h_world, d_world) => { 
+                    const bodyGeo = new THREE.BoxGeometry(w_world, h_world * 0.6, d_world);
+                    const body = new THREE.Mesh(bodyGeo); 
+                    body.position.y = (h_world * 0.6) / 2; // Base of body at y=0 of group
+
+                    const roofGeo = new THREE.ConeGeometry(w_world * 0.75, h_world * 0.4, 4);
+                    const roof = new THREE.Mesh(roofGeo);
+                    roof.position.y = (h_world * 0.6) + (h_world * 0.4 / 2); // Stack roof on body
+                    roof.rotation.y = Math.PI / 4;
+                    return { bodyMesh: body, roofMesh: roof }; // Return named meshes
+                }
+            },
+            'duplex': {
+                name: 'Duplex (2x1)',
+                size: { w: 2, h: 1.5, d: 1 },
+                color: 0x66cc66,
+                createGeometry: (w_world, h_world, d_world) => {
+                    const singleUnitWidth = w_world / 2;
+                    const bodyHeight = h_world * 0.6;
+                    
+                    const bodyGeo = new THREE.BoxGeometry(w_world, bodyHeight, d_world);
+                    const body = new THREE.Mesh(bodyGeo);
+                    body.position.y = bodyHeight / 2;
+
+                    const roofHeight = h_world * 0.4;
+                    const roofBaseY = bodyHeight;
+
+                    const roof1Geo = new THREE.ConeGeometry(singleUnitWidth * 0.75, roofHeight, 4);
+                    const roof1 = new THREE.Mesh(roof1Geo);
+                    roof1.position.set(-singleUnitWidth / 2, roofBaseY + roofHeight / 2, 0);
+                    roof1.rotation.y = Math.PI / 4;
+
+                    const roof2Geo = new THREE.ConeGeometry(singleUnitWidth * 0.75, roofHeight, 4);
+                    const roof2 = new THREE.Mesh(roof2Geo);
+                    roof2.position.set(singleUnitWidth / 2, roofBaseY + roofHeight / 2, 0);
+                    roof2.rotation.y = Math.PI / 4;
+                    return { bodyMesh: body, roof1Mesh: roof1, roof2Mesh: roof2 };
+                }
+            },
+            'park': {
+                name: 'Park (2x2)',
+                size: { w: 2, h: 0.2, d: 2 }, // Grid cells for base height
+                color: 0x558855, // Park base color
+                createGeometry: (w_world, h_world_base, d_world) => { // h_world_base is for the flat part
+                    const baseGeo = new THREE.BoxGeometry(w_world, h_world_base, d_world);
+                    const base = new THREE.Mesh(baseGeo);
+                    base.position.y = h_world_base/2;
+
+                    const treeTrunkHeight = 0.8 * cellSize; // Make trees a bit taller
+                    const treeLeavesHeight = 1.0 * cellSize;
+                    const treeTrunkRadius = 0.1 * cellSize;
+                    const treeLeavesRadius = 0.4 * cellSize;
+
+                    const treeTrunkGeom = new THREE.CylinderGeometry(treeTrunkRadius, treeTrunkRadius, treeTrunkHeight, 8);
+                    const treeLeavesGeom = new THREE.ConeGeometry(treeLeavesRadius, treeLeavesHeight, 5); // More leaf-like
+
+                    const tree1Trunk = new THREE.Mesh(treeTrunkGeom);
+                    tree1Trunk.position.set(-w_world/3.5, h_world_base + treeTrunkHeight/2, -d_world/3.5);
+                    
+                    const tree1Leaves = new THREE.Mesh(treeLeavesGeom);
+                    tree1Leaves.position.set(-w_world/3.5, h_world_base + treeTrunkHeight + treeLeavesHeight/2, -d_world/3.5);
+                    
+                    const tree2Trunk = new THREE.Mesh(treeTrunkGeom.clone());
+                    tree2Trunk.position.set(w_world/3.5, h_world_base + treeTrunkHeight/2, d_world/4);
+
+                    const tree2Leaves = new THREE.Mesh(treeLeavesGeom.clone());
+                    tree2Leaves.position.set(w_world/3.5, h_world_base + treeTrunkHeight + treeLeavesHeight/2, d_world/4);
+
+                    return { parkBase: base, trunk1: tree1Trunk, leaves1: tree1Leaves, trunk2: tree2Trunk, leaves2: tree2Leaves };
+                }
+            },
+            'skyscraper': {
+                name: 'Skyscraper (1x1)',
+                size: { w: 1, h: 5, d: 1 },
+                color: 0x778899, // LightSlateGray
+                createGeometry: (w_world, h_world, d_world) => {
+                    const bodyGeo = new THREE.BoxGeometry(w_world, h_world, d_world);
+                    const body = new THREE.Mesh(bodyGeo);
+                    body.position.y = h_world/2;
+                    return { bodyMesh: body };
+                }
+            },
+             'factory': {
+                name: 'Factory (3x2)',
+                size: { w: 3, h: 2, d: 2 }, 
+                color: 0xA9A9A9, // DarkGray for main building
+                createGeometry: (w_world, h_world_overall, d_world) => { 
+                    const mainBuildingHeight = h_world_overall * 0.7;
+                    const chimneyHeight = h_world_overall * 0.9; // Chimney slightly less than overall height
+
+                    const mainBuildingGeo = new THREE.BoxGeometry(w_world, mainBuildingHeight, d_world);
+                    const mainBuilding = new THREE.Mesh(mainBuildingGeo);
+                    mainBuilding.position.y = mainBuildingHeight/2;
+                    
+                    const chimneyGeo = new THREE.CylinderGeometry(w_world * 0.06, w_world * 0.06, chimneyHeight, 8);
+                    const chimney = new THREE.Mesh(chimneyGeo);
+                    // Position chimney relative to main building body, towards one end
+                    chimney.position.set(w_world * 0.35, chimneyHeight/2, -d_world * 0.3); 
+                    return { mainBuildingMesh: mainBuilding, chimneyMesh: chimney };
+                }
+            }
+        };
+
+        // --- Materials Cache ---
+        const materialsCache = {};
+        function getMaterial(color) {
+            const cacheKey = color.toString(16).padStart(6, '0'); // Ensure consistent key format
+            if (!materialsCache[cacheKey]) {
+                materialsCache[cacheKey] = new THREE.MeshLambertMaterial({ color });
+            }
+            return materialsCache[cacheKey];
+        }
+        const ghostMaterial = new THREE.MeshLambertMaterial({ color: 0x00dd00, transparent: true, opacity: 0.6, depthWrite: false });
+        const selectedMaterial = new THREE.MeshLambertMaterial({ color: 0xffff33, emissive: 0x444400, depthWrite: false });
+        const collisionMaterial = new THREE.MeshLambertMaterial({ color: 0xdd0000, transparent: true, opacity: 0.7, depthWrite: false });
+
+
+        init();
+        animate();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87ceeb); 
+            scene.fog = new THREE.Fog(0x87ceeb, gridSize * 0.8, gridSize * 2.5); // Adjusted fog
+
+            camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000); // Slightly narrower FOV
+            camera.position.set(gridSize * 0.7, gridSize * 0.8, gridSize * 0.7); 
+            camera.lookAt(0, 0, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false }); // alpha false if not needed
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap; 
+            container.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6); 
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.9); 
+            directionalLight.position.set(-gridSize * 0.7, gridSize, gridSize * 0.6); 
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 2048; 
+            directionalLight.shadow.mapSize.height = 2048;
+            const shadowCamExtent = gridSize * 1.1; 
+            directionalLight.shadow.camera.left = -shadowCamExtent;
+            directionalLight.shadow.camera.right = shadowCamExtent;
+            directionalLight.shadow.camera.top = shadowCamExtent;
+            directionalLight.shadow.camera.bottom = -shadowCamExtent;
+            directionalLight.shadow.camera.near = 10; 
+            directionalLight.shadow.camera.far = gridSize * 2.5;
+            directionalLight.shadow.bias = -0.0005; // Helps reduce shadow acne
+            scene.add(directionalLight);
+            scene.add(directionalLight.target); 
+
+            const groundGeometry = new THREE.PlaneGeometry(gridSize * 1.5, gridSize * 1.5); // Slightly smaller ground vis for effect
+            const groundMaterial = new THREE.MeshLambertMaterial({ color: 0x77aa77 }); 
+            const groundPlane = new THREE.Mesh(groundGeometry, groundMaterial);
+            groundPlane.rotation.x = -Math.PI / 2;
+            groundPlane.receiveShadow = true;
+            groundPlane.name = "ground";
+            scene.add(groundPlane);
+
+            const gridHelper = new THREE.GridHelper(gridSize, gridSize / cellSize, 0xbbbbbb, 0xbbbbbb);
+            gridHelper.position.y = 0.01; 
+            scene.add(gridHelper);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.screenSpacePanning = true; 
+            controls.minDistance = cellSize * 2;
+            controls.maxDistance = gridSize * 1.8;
+            controls.maxPolarAngle = Math.PI / 2.1; 
+
+            raycaster = new THREE.Raycaster();
+            mouse = new THREE.Vector2();
+
+            window.addEventListener('resize', onWindowResize);
+            container.addEventListener('mousemove', onMouseMove);
+            container.addEventListener('mousedown', onMouseDown);
+            window.addEventListener('keydown', onKeyDown);
+
+            setupUI();
+            setTool(currentTool); // Creates initial ghost
+            console.log("3D Village Builder Initialized.");
+            document.getElementById('info').textContent = "Orbit: Mouse Drag | Zoom: Scroll | Place: Click Ground | Rotate: R | Select/Deselect: Esc | Delete: Del/Backspace";
+        }
+
+        function setupUI() {
+            const buildingSelector = document.getElementById('building-selector');
+            buildingSelector.innerHTML = ''; 
+            for (const typeKey in buildingTypes) {
+                const option = document.createElement('option');
+                option.value = typeKey;
+                option.textContent = buildingTypes[typeKey].name;
+                buildingSelector.appendChild(option);
+            }
+            currentBuildingType = buildingSelector.value;
+
+            buildingSelector.addEventListener('change', (e) => {
+                currentBuildingType = e.target.value;
+                if (currentTool === 'place') {
+                    if (ghostBuilding) scene.remove(ghostBuilding);
+                    createGhostBuilding(); 
+                }
+                updateInfo();
+            });
+
+            document.getElementById('tool-place').addEventListener('click', () => setTool('place'));
+            document.getElementById('tool-move').addEventListener('click', () => setTool('move'));
+            document.getElementById('tool-delete').addEventListener('click', () => setTool('delete'));
+        }
+        
+        function setTool(toolName) {
+            currentTool = toolName;
+            deselectBuilding(); // This handles selected state and potential move ghosts
+            if (ghostBuilding) { // Remove any existing ghost
+                scene.remove(ghostBuilding);
+                ghostBuilding = null;
+            }
+            if (currentTool === 'place') { // Create placement ghost if in place mode
+                createGhostBuilding();
+            }
+            updateToolButtons();
+            updateInfo();
+        }
+
+        function updateToolButtons() {
+            document.getElementById('tool-place').classList.toggle('selected-tool', currentTool === 'place');
+            document.getElementById('tool-move').classList.toggle('selected-tool', currentTool === 'move');
+            document.getElementById('tool-delete').classList.toggle('selected-tool', currentTool === 'delete');
+        }
+        
+        function updateInfo() {
+            const infoElement = document.getElementById('info');
+            if (!infoElement) return;
+            let toolText = currentTool.charAt(0).toUpperCase() + currentTool.slice(1);
+            let text = `Tool: ${toolText}. `;
+            if (currentTool === 'place') {
+                text += `Placing: ${buildingTypes[currentBuildingType].name}.`;
+            } else if (currentTool === 'move') {
+                text += `Select building to move, then click new spot.`;
+            } else if (currentTool === 'delete') {
+                text += `Click building to remove.`;
+            }
+            if (selectedBuilding) {
+                text += ` Selected: ${buildingTypes[selectedBuilding.userData.type].name}.`;
+            }
+            infoElement.textContent = text;
+        }
+
+        function createBuildingMeshGroup(typeKey, materialOverride = null) {
+            const typeData = buildingTypes[typeKey];
+            if (!typeData) return null;
+
+            const worldSize = { 
+                w: typeData.size.w * cellSize,
+                h: typeData.size.h * cellSize, // This is overall height for parts calculation
+                d: typeData.size.d * cellSize
+            };
+
+            const group = new THREE.Group();
+            const parts = typeData.createGeometry(worldSize.w, worldSize.h, worldSize.d);
+            
+            for (const partName in parts) {
+                const meshPart = parts[partName]; // This is already a THREE.Mesh
+                
+                if (materialOverride) {
+                    meshPart.material = materialOverride;
+                } else {
+                    // Assign specific materials based on part name convention or fall back to type color
+                    if (partName.toLowerCase().includes("trunk")) meshPart.material = getMaterial(0x8B4513); // SaddleBrown
+                    else if (partName.toLowerCase().includes("leaves")) meshPart.material = getMaterial(0x2E8B57); // SeaGreen
+                    else if (partName.toLowerCase().includes("chimney")) meshPart.material = getMaterial(0x696969); // DimGray
+                    else if (partName.toLowerCase().includes("roof")) meshPart.material = getMaterial(typeData.color - 0x111111); // Slightly darker roof
+                    else meshPart.material = getMaterial(typeData.color); // Default color for the building type
+                }
+                
+                meshPart.castShadow = true;
+                meshPart.receiveShadow = true;
+                group.add(meshPart);
+            }
+            
+            group.userData = { type: typeKey, sizeInGridCells: typeData.size, isBuildingGroup: true };
+            return group;
+        }
+
+        function createGhostBuilding() {
+            if (ghostBuilding) scene.remove(ghostBuilding); 
+            ghostBuilding = createBuildingMeshGroup(currentBuildingType, ghostMaterial);
+            if (ghostBuilding) {
+                ghostBuilding.rotation.y = currentRotation * Math.PI / 2;
+                ghostBuilding.position.set(0, -1000, 0); // Hide initially
+                scene.add(ghostBuilding);
+            }
+        }
+
+        function getBuildingEffectiveSizeInGrid(buildingData) {
+            const size = buildingData.sizeInGridCells || buildingTypes[buildingData.type].size;
+            const rotation = typeof buildingData.rotation === 'number' ? buildingData.rotation : 0; 
+            
+            if (rotation % 2 === 1) { // Rotated 90 or 270 degrees
+                return { w: size.d, d: size.w };
+            }
+            return { w: size.w, d: size.d };
+        }
+
+        function checkCollision(targetGridPos, buildingTypeKey, rotationForCollisionCheck, excludeBuildingMeshGroup = null) {
+            const buildingType = buildingTypes[buildingTypeKey];
+            const effectiveSize = getBuildingEffectiveSizeInGrid({ sizeInGridCells: buildingType.size, rotation: rotationForCollisionCheck });
+
+            const newBuildingFootprint = [];
+            // targetGridPos is the center-ish cell. Calculate all cells covered.
+            const halfW = Math.floor(effectiveSize.w / 2);
+            const halfD = Math.floor(effectiveSize.d / 2);
+            
+            // Top-left cell of the footprint
+            const startX = targetGridPos.x - halfW;
+            const startZ = targetGridPos.z - halfD;
+            
+            for (let dx = 0; dx < effectiveSize.w; dx++) {
+                for (let dz = 0; dz < effectiveSize.d; dz++) {
+                    newBuildingFootprint.push({
+                        x: startX + dx,
+                        z: startZ + dz
+                    });
+                }
+            }
+            
+            for (const existingBuilding of placedBuildings) {
+                if (excludeBuildingMeshGroup && existingBuilding.mesh === excludeBuildingMeshGroup) continue;
+
+                const existingEffectiveSize = getBuildingEffectiveSizeInGrid(existingBuilding);
+                const existingHalfW = Math.floor(existingEffectiveSize.w / 2);
+                const existingHalfD = Math.floor(existingEffectiveSize.d / 2);
+                const existingStartX = existingBuilding.gridPos.x - existingHalfW;
+                const existingStartZ = existingBuilding.gridPos.z - existingHalfD;
+
+                for (let ex = 0; ex < existingEffectiveSize.w; ex++) {
+                    for (let ez = 0; ez < existingEffectiveSize.d; ez++) {
+                        const existingCell = {
+                            x: existingStartX + ex,
+                            z: existingStartZ + ez
+                        };
+                        for (const newCell of newBuildingFootprint) {
+                            if (newCell.x === existingCell.x && newCell.z === existingCell.z) {
+                                return true; // Collision
+                            }
+                        }
+                    }
+                }
+            }
+            return false; // No collision
+        }
+        
+        function worldToGridCoords(worldX, worldZ) {
+            // Snap to the center of the nearest grid cell
+            return {
+                x: Math.round(worldX / cellSize), 
+                z: Math.round(worldZ / cellSize)
+            };
+        }
+
+        function gridToWorldCoords(gridX, gridZ, _buildingTypeKey) { // buildingTypeKey not strictly needed here anymore
+            // The group's (0,0,0) is its base center on the ground (y=0).
+            return new THREE.Vector3(gridX * cellSize, 0, gridZ * cellSize);
+        }
+
+        function onMouseMove(event) {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            if ((currentTool === 'place' || (currentTool === 'move' && selectedBuilding)) && ghostBuilding) {
+                raycaster.setFromCamera(mouse, camera);
+                const intersects = raycaster.intersectObject(scene.getObjectByName("ground"), false); // non-recursive
+                if (intersects.length > 0) {
+                    const intersectPoint = intersects[0].point;
+                    const gridCoords = worldToGridCoords(intersectPoint.x, intersectPoint.z);
+                    
+                    const buildingTypeToGhost = (currentTool === 'move' && selectedBuilding) ? selectedBuilding.userData.type : currentBuildingType;
+                    const rotationToGhost = (currentTool === 'move' && selectedBuilding) ? selectedBuilding.userData.rotation : currentRotation;
+
+                    const worldPos = gridToWorldCoords(gridCoords.x, gridCoords.z, buildingTypeToGhost);
+                    ghostBuilding.position.copy(worldPos);
+                    ghostBuilding.rotation.y = rotationToGhost * Math.PI / 2;
+
+                    let collides;
+                    if (currentTool === 'place') {
+                        collides = checkCollision(gridCoords, buildingTypeToGhost, rotationToGhost);
+                    } else { 
+                        collides = checkCollision(gridCoords, buildingTypeToGhost, rotationToGhost, selectedBuilding);
+                    }
+
+                    const materialToApply = collides ? collisionMaterial : ghostMaterial;
+                    ghostBuilding.traverse((child) => { 
+                        if(child.isMesh) child.material = materialToApply; 
+                    });
+                }
+            }
+        }
+
+        function onMouseDown(event) {
+            if (event.target !== renderer.domElement) return; // Only interact if click is on canvas
+            if (event.button !== 0) return; 
+
+            raycaster.setFromCamera(mouse, camera);
+
+            if (currentTool === 'place') {
+                if (!ghostBuilding) return; 
+                const intersectsGround = raycaster.intersectObject(scene.getObjectByName("ground"), false);
+                if (intersectsGround.length > 0) {
+                    const intersectPoint = intersectsGround[0].point;
+                    const gridCoords = worldToGridCoords(intersectPoint.x, intersectPoint.z);
+                    
+                    if (!checkCollision(gridCoords, currentBuildingType, currentRotation)) {
+                        const newBuildingGroup = createBuildingMeshGroup(currentBuildingType);
+                        const worldPos = gridToWorldCoords(gridCoords.x, gridCoords.z, currentBuildingType);
+                        newBuildingGroup.position.copy(worldPos);
+                        newBuildingGroup.rotation.y = currentRotation * Math.PI / 2;
+                        
+                        newBuildingGroup.userData.type = currentBuildingType;
+                        newBuildingGroup.userData.gridPos = { ...gridCoords }; 
+                        newBuildingGroup.userData.rotation = currentRotation;
+
+                        scene.add(newBuildingGroup);
+                        placedBuildings.push({
+                            mesh: newBuildingGroup,
+                            type: currentBuildingType,
+                            gridPos: { ...gridCoords },
+                            rotation: currentRotation,
+                            sizeInGridCells: buildingTypes[currentBuildingType].size 
+                        });
+                    } else {
+                        console.log("Cannot place: collision detected.");
+                    }
+                }
+            } else if (currentTool === 'move') {
+                if (!selectedBuilding) { 
+                    const buildingMeshGroups = placedBuildings.map(b => b.mesh);
+                    const intersectsBuildings = raycaster.intersectObjects(buildingMeshGroups, true); // Recursive to hit parts
+                    if (intersectsBuildings.length > 0) {
+                        let buildingGroup = intersectsBuildings[0].object;
+                        while(buildingGroup.parent && !buildingGroup.userData.isBuildingGroup) {
+                            buildingGroup = buildingGroup.parent;
+                        }
+                        if (buildingGroup.userData.isBuildingGroup) {
+                            selectBuilding(buildingGroup);
+                            // Create move ghost
+                            if (ghostBuilding) scene.remove(ghostBuilding); // remove placement ghost
+                            ghostBuilding = createBuildingMeshGroup(selectedBuilding.userData.type, ghostMaterial);
+                            if (ghostBuilding) {
+                                ghostBuilding.rotation.y = selectedBuilding.userData.rotation * Math.PI / 2;
+                                scene.add(ghostBuilding);
+                                // Trigger mouse move to position it
+                                onMouseMove({clientX: event.clientX, clientY: event.clientY}); 
+                            }
+                        }
+                    }
+                } else { 
+                    const intersectsGround = raycaster.intersectObject(scene.getObjectByName("ground"), false);
+                    if (intersectsGround.length > 0 && ghostBuilding) { // ghostBuilding is now the move ghost
+                        const intersectPoint = intersectsGround[0].point;
+                        const gridCoords = worldToGridCoords(intersectPoint.x, intersectPoint.z);
+                        
+                        if (!checkCollision(gridCoords, selectedBuilding.userData.type, selectedBuilding.userData.rotation, selectedBuilding)) {
+                            const worldPos = gridToWorldCoords(gridCoords.x, gridCoords.z, selectedBuilding.userData.type);
+                            selectedBuilding.position.copy(worldPos);
+                            
+                            const buildingData = placedBuildings.find(b => b.mesh === selectedBuilding);
+                            if (buildingData) buildingData.gridPos = { ...gridCoords };
+                            selectedBuilding.userData.gridPos = { ...gridCoords };
+                            
+                            deselectBuilding(); // This will also handle removing the move ghost and recreating place ghost if needed
+                        } else {
+                            console.log("Cannot move: collision detected.");
+                        }
+                    }
+                }
+            } else if (currentTool === 'delete') {
+                 const buildingMeshGroups = placedBuildings.map(b => b.mesh);
+                 const intersectsBuildings = raycaster.intersectObjects(buildingMeshGroups, true);
+                 if (intersectsBuildings.length > 0) {
+                    let buildingGroup = intersectsBuildings[0].object;
+                    while(buildingGroup.parent && !buildingGroup.userData.isBuildingGroup) {
+                        buildingGroup = buildingGroup.parent;
+                    }
+                    if (buildingGroup.userData.isBuildingGroup) {
+                        deleteBuilding(buildingGroup);
+                    }
+                }
+            }
+            updateInfo();
+        }
+
+        function onKeyDown(event) {
+            // Prevent browser default actions for keys we use (like Backspace for navigation)
+            if (event.key === 'Delete' || event.key === 'Backspace' || event.key.toLowerCase() === 'r') {
+                // event.preventDefault(); // Careful with this, can block text input if game had it
+            }
+
+            if (event.key.toLowerCase() === 'r') { 
+                if (currentTool === 'place' && ghostBuilding) {
+                    currentRotation = (currentRotation + 1) % 4;
+                    ghostBuilding.rotation.y = currentRotation * Math.PI / 2;
+                    const FAKE_MOUSE_EVENT = { 
+                        clientX: mouse.x * (window.innerWidth / 2) + (window.innerWidth / 2),
+                        clientY: -mouse.y * (window.innerHeight / 2) + (window.innerHeight / 2)
+                    };
+                    onMouseMove(FAKE_MOUSE_EVENT); // Update ghost collision status
+                }
+            }
+
+            if (event.key === 'Escape') {
+                if (selectedBuilding) {
+                    deselectBuilding(); 
+                }
+                // If in move tool and no building selected, Esc doesn't do much here, could switch to 'place' tool
+                updateInfo();
+            }
+            
+            if (event.key === 'Delete' || event.key === 'Backspace') {
+                if (selectedBuilding) { // Delete selected regardless of current tool
+                    deleteBuilding(selectedBuilding); 
+                    // selectedBuilding will be set to null in deleteBuilding if it was the one deleted
+                }
+            }
+        }
+
+        function selectBuilding(buildingGroup) {
+            if (selectedBuilding === buildingGroup) return;
+            deselectBuilding(); // Deselect previous, handles ghosts
+            
+            selectedBuilding = buildingGroup;
+            selectedBuilding.userData.originalMaterials = new Map(); 
+            selectedBuilding.traverse(child => { 
+                if (child.isMesh) {
+                    selectedBuilding.userData.originalMaterials.set(child, child.material);
+                    child.material = selectedMaterial;
+                }
+            });
+            // If we select a building, and we were in 'place' mode, remove the placement ghost.
+            if (currentTool === 'place' && ghostBuilding) { 
+                 scene.remove(ghostBuilding); 
+                 ghostBuilding = null;
+            }
+            updateInfo();
+        }
+
+        function deselectBuilding() {
+            if (selectedBuilding && selectedBuilding.userData.originalMaterials) {
+                selectedBuilding.traverse(child => {
+                    if (child.isMesh && selectedBuilding.userData.originalMaterials.has(child)) {
+                        child.material = selectedBuilding.userData.originalMaterials.get(child);
+                    }
+                });
+                selectedBuilding.userData.originalMaterials = null;
+            }
+            selectedBuilding = null;
+
+            // Ghost management based on current tool
+            if (ghostBuilding && currentTool === 'move') { // If a move ghost was active (because selectedBuilding was just cleared)
+                scene.remove(ghostBuilding);
+                ghostBuilding = null;
+            }
+            // If now in 'place' mode and no ghost exists (e.g. after deselecting or changing tool to place)
+            if (currentTool === 'place' && !ghostBuilding) { 
+                createGhostBuilding();
+            }
+            updateInfo();
+        }
+        
+        function deleteBuilding(buildingGroup) {
+            const index = placedBuildings.findIndex(b => b.mesh === buildingGroup);
+            if (index > -1) {
+                placedBuildings.splice(index, 1);
+                scene.remove(buildingGroup); 
+                buildingGroup.traverse(child => {
+                    if (child.isMesh) {
+                        child.geometry.dispose();
+                        // Materials are managed by cache or are special instances, no broad dispose.
+                    }
+                });
+                console.log(`Building ${buildingGroup.userData.type} deleted.`);
+            }
+            if (selectedBuilding === buildingGroup) {
+                // Don't call deselectBuilding directly here as it might try to recreate a ghost
+                // when we actually want the selection cleared because the item is gone.
+                selectedBuilding = null; 
+                updateInfo(); // Update UI to reflect no selection
+                // After deleting, if current tool is 'place', ensure ghost is there
+                if (currentTool === 'place' && !ghostBuilding) {
+                    createGhostBuilding();
+                }
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+    </script>
+</body>
+</html>
