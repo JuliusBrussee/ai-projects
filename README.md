@@ -32,6 +32,7 @@ This repository will house various projects, each initiated with a relatively si
 ### Current Projects:
 
 *   **[Basic 3D Village Builder](./projects/01-3D-Village-Builder/README.md):** A single HTML file game using Three.js, generated from a request for a simple 3D village building experience with specific core features.
+*   *   **[Basic 3D Wealth Disparity Display](./projects/03-Wealthy-Disparity-Visualizer/README.md):** A single HTML file using Three.js, generated from a request for a simple 3D display meant to display the wealth disparity in America using calculated block heights.
 
 ## How to Interpret Results
 
