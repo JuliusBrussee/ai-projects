@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wealth Disparity Visualization</title>
+    <style>
+        body { 
+            margin: 0; 
+            overflow: hidden; /* Prevent scrollbars */
+            background-color: #222233; /* Match scene background for seamless look */
+            font-family: Arial, sans-serif;
+            color: #f0f0f0;
+        }
+        canvas { 
+            display: block; 
+        }
+        #controls-key-overlay {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            background-color: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            max-width: 320px;
+            max-height: 95vh;
+            overflow-y: auto;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        #controls h2, #key h2 {
+            margin-top: 0;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+            border-bottom: 1px solid #555;
+            padding-bottom: 5px;
+        }
+        #controls div {
+            margin-bottom: 10px;
+        }
+        #controls label {
+            display: inline-block;
+            width: 120px;
+            font-size: 0.9em;
+        }
+        #controls input[type="range"] {
+            width: 120px;
+            vertical-align: middle;
+        }
+        #controls span {
+            display: inline-block;
+            width: 35px;
+            text-align: right;
+            font-size: 0.9em;
+            vertical-align: middle;
+        }
+        #legendList {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        #legendList li {
+            display: flex;
+            align-items: center;
+            margin-bottom: 5px;
+            font-size: 0.85em;
+        }
+        .color-swatch {
+            display: inline-block;
+            width: 15px;
+            height: 15px;
+            margin-right: 8px;
+            border: 1px solid #777;
+            flex-shrink: 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls-key-overlay">
+        <div id="controls">
+            <h2>Controls</h2>
+            <div>
+                <label for="visualScaleSlider">Visual Scale:</label>
+                <input type="range" id="visualScaleSlider" min="0.05" max="3" step="0.01" value="1.0">
+                <span id="visualScaleValue">1.00</span>
+            </div>
+            <div>
+                <label for="baseSizeSlider">Block Base Size:</label>
+                <input type="range" id="baseSizeSlider" min="0.5" max="10" step="0.1" value="3.5">
+                <span id="baseSizeValue">3.5</span>
+            </div>
+            <div>
+                <label for="spacingSlider">Block Spacing:</label>
+                <input type="range" id="spacingSlider" min="1" max="20" step="0.1" value="6.0">
+                <span id="spacingValue">6.0</span>
+            </div>
+        </div>
+        <div id="key">
+            <h2>Data Key (Approx. Net Worth)</h2>
+            <ul id="legendList"></ul>
+        </div>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.163.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.163.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // --- SCENE SETUP ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x222233);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 5000); // Increased far plane
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        // --- CONTROLS ---
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true; 
+        controls.dampingFactor = 0.05;
+        controls.screenSpacePanning = false;
+        controls.minDistance = 1; 
+        controls.maxDistance = 2000; // Increased max distance
+        controls.maxPolarAngle = Math.PI / 1.9;
+
+        // --- LIGHTING ---
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        directionalLight.position.set(70, 150, 60);
+        directionalLight.castShadow = true;
+        directionalLight.shadow.mapSize.width = 2048;
+        directionalLight.shadow.mapSize.height = 2048;
+        directionalLight.shadow.camera.near = 10;
+        directionalLight.shadow.camera.far = 400; // Adjusted dynamically later
+        
+        const shadowCamFrustumSize = 150; // Initial, will be adjusted
+        directionalLight.shadow.camera.left = -shadowCamFrustumSize;
+        directionalLight.shadow.camera.right = shadowCamFrustumSize;
+        directionalLight.shadow.camera.top = shadowCamFrustumSize;
+        directionalLight.shadow.camera.bottom = -shadowCamFrustumSize;
+        scene.add(directionalLight);
+        // const shadowCamHelper = new THREE.CameraHelper(directionalLight.shadow.camera); // For debugging
+        // scene.add(shadowCamHelper);
+
+
+        // --- GROUND PLANE ---
+        const groundGeometry = new THREE.PlaneGeometry(1000, 1000); // Larger ground
+        const groundMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0x3c3c3c,
+            side: THREE.DoubleSide 
+        });
+        const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+        ground.rotation.x = -Math.PI / 2;
+        ground.position.y = 0;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        // --- WEALTH DATA AND CONSTANTS ---
+        const wealthBrackets = [
+            { name: "Poorest 10% (0-10th)", value: 5000, color: 0x505050 }, 
+            { name: "10-20th percentile", value: 15000, color: 0x585858 },
+            { name: "20-30th percentile", value: 35000, color: 0x606060 },
+            { name: "30-40th percentile", value: 70000, color: 0x686868 },
+            { name: "40-50th percentile", value: 130000, color: 0x707070 },
+            { name: "50-60th (Median)", value: 250000, color: 0x787878 },
+            { name: "60-70th percentile", value: 400000, color: 0x808080 },
+            { name: "70-80th percentile", value: 650000, color: 0x909090 },
+            { name: "80-90th percentile", value: 1200000, color: 0xA0A0A0 }, 
+            { name: "90-95th percentile", value: 2500000, color: 0xB8B8B8 },
+            { name: "95-99th percentile", value: 7000000, color: 0xD0D0D0 }, 
+            { name: "Top 1% (99-99.9th)", value: 20000000, color: 0xffe066 },
+            { name: "Top 0.1% (99.9-99.99th)", value: 70000000, color: 0xffd700 },
+            { name: "Top 3rd Individual", value: 160_000_000_000, color: 0xffc400 },
+            { name: "Top 2nd Individual", value: 180_000_000_000, color: 0xffac00 },
+            { name: "Top 1st Individual", value: 200_000_000_000, color: 0xff8c00 },
+        ];
+
+        const MAX_WEALTH_FOR_SCALE = 200_000_000_000;
+        const MAX_TOWER_HEIGHT_BASE = 100; // Base max height for the tallest tower
+        const BASE_HEIGHT_SCALE_FACTOR = MAX_TOWER_HEIGHT_BASE / MAX_WEALTH_FOR_SCALE;
+        const MIN_VISIBLE_HEIGHT = 0.02; 
+
+        // --- UI CONTROL VARIABLES ---
+        let currentVisualScaleMultiplier = 1.0;
+        let currentCubeBaseSize = 3.5;
+        let currentCubeSpacing = 6.0;
+
+        // --- OBJECTS (WEALTH TOWERS) ---
+        let wealthCubes = [];
+        const BASE_CUBE_GEOMETRY = new THREE.BoxGeometry(1, 1, 1); // Unit cube, will be scaled
+
+        function createOrUpdateWealthTowers() {
+            const numCubes = wealthBrackets.length;
+            const totalLayoutWidth = (numCubes - 1) * currentCubeSpacing;
+            const startX = -totalLayoutWidth / 2;
+            let maxActualHeight = 0;
+
+            wealthBrackets.forEach((bracket, index) => {
+                let cube;
+                let material;
+
+                if (wealthCubes[index]) {
+                    cube = wealthCubes[index].mesh;
+                    material = cube.material; // Reuse material
+                } else {
+                    material = new THREE.MeshStandardMaterial({
+                        color: bracket.color,
+                        metalness: bracket.value > 10_000_000 ? 0.5 : 0.2,
+                        roughness: 0.5
+                    });
+                    cube = new THREE.Mesh(BASE_CUBE_GEOMETRY, material);
+                    cube.castShadow = true;
+                    cube.receiveShadow = true;
+                    scene.add(cube);
+                    wealthCubes[index] = { mesh: cube, bracketData: bracket };
+                }
+                
+                // Update color if needed (though it's fixed in this data)
+                material.color.set(bracket.color);
+
+                let wealthValue = bracket.value;
+                let towerHeight = wealthValue * BASE_HEIGHT_SCALE_FACTOR * currentVisualScaleMultiplier;
+
+                if (towerHeight > 0 && towerHeight < MIN_VISIBLE_HEIGHT * currentVisualScaleMultiplier) {
+                    towerHeight = MIN_VISIBLE_HEIGHT * currentVisualScaleMultiplier;
+                } else if (towerHeight <= 0) {
+                    towerHeight = (MIN_VISIBLE_HEIGHT * 0.5) * currentVisualScaleMultiplier;
+                }
+                maxActualHeight = Math.max(maxActualHeight, towerHeight);
+
+                cube.scale.set(currentCubeBaseSize, towerHeight, currentCubeBaseSize);
+                cube.position.set(
+                    startX + index * currentCubeSpacing,
+                    towerHeight / 2, // Base of the cube sits on the ground plane (y=0)
+                    0
+                );
+            });
+             // Adjust shadow camera to encompass the scene dynamically
+            directionalLight.shadow.camera.far = 2 * maxActualHeight + 200; // Extend far plane based on max height
+            const newFrustumSize = Math.max(maxActualHeight * 0.8, totalLayoutWidth * 0.6, 100); // Ensure reasonable frustum
+            directionalLight.shadow.camera.left = -newFrustumSize;
+            directionalLight.shadow.camera.right = newFrustumSize;
+            directionalLight.shadow.camera.top = newFrustumSize;
+            directionalLight.shadow.camera.bottom = -newFrustumSize;
+            directionalLight.shadow.camera.updateProjectionMatrix();
+            // if (shadowCamHelper) shadowCamHelper.update();
+        }
+        
+        // --- UI ELEMENTS AND EVENT LISTENERS ---
+        const visualScaleSlider = document.getElementById('visualScaleSlider');
+        const visualScaleValue = document.getElementById('visualScaleValue');
+        const baseSizeSlider = document.getElementById('baseSizeSlider');
+        const baseSizeValue = document.getElementById('baseSizeValue');
+        const spacingSlider = document.getElementById('spacingSlider');
+        const spacingValue = document.getElementById('spacingValue');
+        const legendList = document.getElementById('legendList');
+
+        visualScaleSlider.addEventListener('input', (event) => {
+            currentVisualScaleMultiplier = parseFloat(event.target.value);
+            visualScaleValue.textContent = currentVisualScaleMultiplier.toFixed(2);
+            createOrUpdateWealthTowers();
+        });
+
+        baseSizeSlider.addEventListener('input', (event) => {
+            currentCubeBaseSize = parseFloat(event.target.value);
+            baseSizeValue.textContent = currentCubeBaseSize.toFixed(1);
+            createOrUpdateWealthTowers();
+        });
+
+        spacingSlider.addEventListener('input', (event) => {
+            currentCubeSpacing = parseFloat(event.target.value);
+            spacingValue.textContent = currentCubeSpacing.toFixed(1);
+            createOrUpdateWealthTowers();
+        });
+
+        function populateLegend() {
+            legendList.innerHTML = ''; // Clear previous entries
+            wealthBrackets.forEach(bracket => {
+                const listItem = document.createElement('li');
+                
+                const colorSwatch = document.createElement('span');
+                colorSwatch.className = 'color-swatch';
+                colorSwatch.style.backgroundColor = '#' + new THREE.Color(bracket.color).getHexString();
+                
+                const textNode = document.createTextNode(`${bracket.name}: ~$${bracket.value.toLocaleString()}`);
+                
+                listItem.appendChild(colorSwatch);
+                listItem.appendChild(textNode);
+                legendList.appendChild(listItem);
+            });
+        }
+
+        // --- INITIALIZATION ---
+        function init() {
+            // Set initial slider values from defaults
+            visualScaleSlider.value = currentVisualScaleMultiplier;
+            visualScaleValue.textContent = currentVisualScaleMultiplier.toFixed(2);
+            baseSizeSlider.value = currentCubeBaseSize;
+            baseSizeValue.textContent = currentCubeBaseSize.toFixed(1);
+            spacingSlider.value = currentCubeSpacing;
+            spacingValue.textContent = currentCubeSpacing.toFixed(1);
+
+            createOrUpdateWealthTowers(); // Create initial towers
+            populateLegend(); // Populate the legend
+
+            // Initial Camera Position (can be adjusted)
+            // Attempt to frame the initial set of blocks reasonably
+            const initialTotalLayoutWidth = (wealthBrackets.length - 1) * currentCubeSpacing;
+            const initialMaxHeight = MAX_TOWER_HEIGHT_BASE * currentVisualScaleMultiplier;
+
+            camera.position.set(
+                -initialTotalLayoutWidth * 0.2, // Slightly to the side
+                initialMaxHeight * 0.4,      // Elevated view
+                initialTotalLayoutWidth * 0.7 + initialMaxHeight * 0.3 // Distance based on spread and height
+            );
+            camera.lookAt(initialTotalLayoutWidth * 0.1, initialMaxHeight / 6, 0); 
+            controls.target.set(initialTotalLayoutWidth * 0.1, initialMaxHeight / 6, 0);
+            controls.update();
+        }
+
+
+        // --- RESIZE HANDLING ---
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // --- ANIMATION LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update(); 
+            renderer.render(scene, camera);
+        }
+
+        init();
+        animate();
+    </script>
+</body>
+</html>
