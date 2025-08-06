@@ -20,24 +20,22 @@ The core idea is to provide an LLM with a high-level concept or a set of core fe
 *   **Improve Prompt Engineering:** To learn how to formulate prompts more effectively to guide LLMs towards desired outcomes, especially for complex tasks.
 *   **Showcase Potential:** To demonstrate the impressive potential of LLMs as tools for rapid prototyping, learning, and even production-level assistance.
 
-## Projects
+## Live Demo
 
-This repository will house various projects, each initiated with a relatively simple prompt given to an LLM. Each project will include:
+A live, unified demo of all projects is available via GitHub Pages:
 
-*   The original prompt(s) given to the LLM.
-*   The generated code.
-*   A project-specific README detailing the experience, observations, and any manual interventions required.
-*   (Where applicable) A `PROMPT_HISTORY.md` or similar, documenting the iterative prompting process if multiple steps were involved.
+**[View All Projects](https://juliabaris.github.io/ai-projects/)**
 
 ## Projects
 
-| Project | LLM | Tags | Preview | Live Demo |
-| --- | --- | --- | --- | --- |
-| [3D Village Builder](./projects/01-village-builder/README.md) | Gemini-2.5Pro | 3D, Game, Three.js | <img src="./projects/01-village-builder/preview.png" width="200"/> | [Link](https://juliabaris.github.io/ai-projects/projects/01-village-builder/output/) |
-| [Wealth Visualizer](./projects/02-wealth-visualizer/README.md) | Gemini-2.5Pro | 3D, Data-Viz, Three.js | | [Link](https://juliabaris.github.io/ai-projects/projects/02-wealth-visualizer/output/) |
-| [Music Synthesizer](./projects/03-music-synthesizer/prompt.md) | Horizon-Beta | Audio, Music, WASM | | [Link](https://juliabaris.github.io/ai-projects/projects/03-music-synthesizer/output/) |
-| [Time-Travel Dashboard](./projects/04-time-travel-dashboard/prompt.md) | Horizon-Beta | 3D, Data-Viz, WebGL | | [Link](https://juliabaris.github.io/ai-projects/projects/04-time-travel-dashboard/output/) |
-| [Poetry Generator](./projects/06-poetry-generator/prompt.md) | Horizon-Beta | Poetry, Text-Gen | | | [Solidity Generator](./projects/07-solidity-generator/prompt.md) | Horizon-Beta | Solidity, Code-Gen, Legal-Tech | |
+| Project | LLM | Tags | Preview |
+| --- | --- | --- | --- |
+| [3D Village Builder](./projects/01-village-builder/README.md) | Gemini-2.5Pro | 3D, Game, Three.js | <img src="./projects/01-village-builder/preview.png" width="200"/> |
+| [Wealth Visualizer](./projects/02-wealth-visualizer/README.md) | Gemini-2.5Pro | 3D, Data-Viz, Three.js | |
+| [Music Synthesizer](./projects/03-music-synthesizer/prompt.md) | Horizon-Beta | Audio, Music, WASM | |
+| [Time-Travel Dashboard](./projects/04-time-travel-dashboard/prompt.md) | Horizon-Beta | 3D, Data-Viz, WebGL | |
+| [Poetry Generator](./projects/05-poetry-generator/prompt.md) | Horizon-Beta | Poetry, Text-Gen | |
+| [Solidity Generator](./projects/06-solidity-generator/prompt.md) | Horizon-Beta | Solidity, Code-Gen, Legal-Tech | |
 
 ## How to Interpret Results
 
