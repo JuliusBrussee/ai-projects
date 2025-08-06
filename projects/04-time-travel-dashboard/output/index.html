@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Time-Travel Data Dashboard</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; }
+  body.dark { background:#0b0f15; color:#dbe6f3; }
+  body.light { background:#f7f9fc; color:#142033; }
+  #app { position:fixed; inset:0; display:grid; grid-template-rows:auto 1fr auto; }
+  header, footer { display:flex; align-items:center; justify-content:space-between; padding:8px 12px; }
+  header { border-bottom:1px solid rgba(255,255,255,.08); }
+  footer { border-top:1px solid rgba(255,255,255,.08); }
+  body.light header, body.light footer { border-color:#dbe3ef; }
+  #toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  button, select, input[type="text"] {
+    background:rgba(255,255,255,0.06); color:inherit; border:1px solid rgba(255,255,255,0.15);
+    border-radius:6px; padding:6px 10px; font-size:14px;
+  }
+  body.light button, body.light select, body.light input[type="text"] {
+    background:#fff; border-color:#cbd6ea; color:#142033;
+  }
+  button:hover { filter:brightness(1.1); }
+  .badge { padding:2px 6px; border-radius:10px; background:rgba(255,255,255,0.08); font-size:11px; }
+  body.light .badge { background:#e9effa; color:#2c3c5b; }
+  #hint { font-size:12px; opacity:.8; }
+  #canvas-container { position:relative; overflow:hidden; }
+  #gl, #overlay { position:absolute; inset:0; display:block; }
+  #panel {
+    position:absolute; top:12px; right:12px; width:320px; max-width:85vw;
+    background:rgba(15,23,36,0.92); border:1px solid rgba(255,255,255,0.12);
+    border-radius:8px; padding:10px; pointer-events:auto;
+  }
+  body.light #panel { background:#ffffffee; border-color:#cbd6ea; }
+  #panel h3 { margin:0 0 6px 0; font-size:16px; }
+  .row { display:flex; gap:6px; margin:6px 0; align-items:center; }
+  .row label { min-width:70px; font-size:12px; opacity:.8; }
+  .branch-list { max-height:160px; overflow:auto; border:1px solid rgba(255,255,255,0.12); border-radius:6px; padding:6px; }
+  .branch-item { display:flex; gap:6px; align-items:center; margin:4px 0; }
+  .branch-item input[type="text"] { flex:1; }
+  #miniChart { position:absolute; width:180px; height:100px; display:none; pointer-events:none;
+               background:#0f1724ee; border:1px solid #2b3d5f; border-radius:8px; }
+  body.light #miniChart { background:#ffffffee; border-color:#cbd6ea; }
+  #miniChart canvas { width:100%; height:100%; display:block; }
+  #tooltip { position:absolute; padding:4px 6px; font-size:12px; display:none; pointer-events:none;
+             background:#0f1724ee; border:1px solid #2b3d5f; border-radius:6px; white-space:nowrap; }
+  body.light #tooltip { background:#ffffffee; border-color:#cbd6ea; color:#142033; }
+</style>
+</head>
+<body class="dark">
+<div id="app">
+  <header>
+    <div id="toolbar">
+      <button id="darkToggle">Dark Mode</button>
+      <select id="datasetSelect">
+        <option value="population">World Population</option>
+        <option value="co2">CO₂ Emissions</option>
+        <option value="nobel">Nobel Laureates</option>
+      </select>
+      <span class="badge" id="yearBadge">Year: --</span>
+      <span class="badge" id="fpsBadge">FPS: --</span>
+      <span class="badge" id="pointsBadge">Points: --</span>
+    </div>
+    <div id="hint">Scroll = time travel, Shift+Drag = bend timeline (branch), Pinch = zoom</div>
+  </header>
+
+  <div id="canvas-container">
+    <canvas id="gl"></canvas>
+    <canvas id="overlay"></canvas>
+
+    <div id="panel">
+      <h3>Branch Editor</h3>
+      <div class="row">
+        <button id="newBranch">New Branch from current</button>
+        <button id="mergeBranches">Merge Selected</button>
+      </div>
+      <div class="row">
+        <label>Active:</label>
+        <select id="activeBranch"></select>
+      </div>
+      <div class="branch-list" id="branchList"></div>
+    </div>
+
+    <div id="miniChart"><canvas></canvas></div>
+    <div id="tooltip"></div>
+  </div>
+
+  <footer>
+    <div>Instanced WebGL | Frustum Culling | RAF Throttling</div>
+    <div><small>Single-file demo; embedded CSV, simplified analytics.</small></div>
+  </footer>
+</div>
+
+<script>
+/* Data (CSV) */
+const CSV_POPULATION = `year,country,value
+1800,World,1000
+1810,World,1080
+1820,World,1200
+1830,World,1320
+1840,World,1450
+1850,World,1580
+1860,World,1700
+1870,World,1850
+1880,World,2000
+1890,World,2200
+1900,World,2400
+1910,World,2600
+1920,World,1860
+1930,World,2070
+1940,World,2300
+1950,World,2550
+1960,World,3030
+1970,World,3710
+1980,World,4440
+1990,World,5310
+2000,World,6120
+2010,World,6950
+2020,World,7670
+2023,World,8000`;
+
+const CSV_CO2 = `year,country,value
+1850,World,200
+1860,World,240
+1870,World,300
+1880,World,400
+1890,World,550
+1900,World,800
+1910,World,1000
+1920,World,1100
+1930,World,1300
+1940,World,1600
+1950,World,2000
+1960,World,2700
+1970,World,3700
+1980,World,4900
+1990,World,6100
+2000,World,7000
+2010,World,8400
+2020,World,9000
+2023,World,9200`;
+
+const CSV_NOBEL = `year,category,value
+1901,Physics,1
+1901,Chemistry,1
+1901,Medicine,1
+1901,Literature,1
+1901,Peace,1
+1902,Physics,1
+1902,Chemistry,1
+1902,Medicine,1
+1902,Literature,1
+1902,Peace,1
+1920,Physics,1
+1920,Chemistry,1
+1920,Medicine,1
+1920,Literature,1
+1920,Peace,1
+1930,Physics,1
+1930,Chemistry,1
+1930,Medicine,1
+1930,Literature,1
+1930,Peace,1
+1945,Peace,0
+1946,Peace,1
+1950,Physics,1
+1950,Chemistry,1
+1950,Medicine,1
+1950,Literature,1
+1950,Peace,1
+1960,Physics,1
+1960,Chemistry,1
+1960,Medicine,1
+1960,Literature,1
+1960,Peace,1
+1970,Physics,1
+1970,Chemistry,1
+1970,Medicine,1
+1970,Literature,1
+1970,Peace,1
+1980,Physics,1
+1980,Chemistry,1
+1980,Medicine,1
+1980,Literature,1
+1980,Peace,1
+1990,Physics,1
+1990,Chemistry,1
+1990,Medicine,1
+1990,Literature,1
+1990,Peace,1
+2000,Physics,1
+2000,Chemistry,1
+2000,Medicine,1
+2000,Literature,1
+2000,Peace,1
+2010,Physics,1
+2010,Chemistry,1
+2010,Medicine,1
+2010,Literature,1
+2010,Peace,1
+2020,Physics,1
+2020,Chemistry,1
+2020,Medicine,1
+2020,Literature,1
+2020,Peace,1
+2023,Physics,1
+2023,Chemistry,1
+2023,Medicine,1
+2023,Literature,1
+2023,Peace,1`;
+
+/* CSV Parse */
+function parseCSV(t){
+  const lines=t.trim().split(/\r?\n/);
+  const h=lines[0].split(',').map(s=>s.trim());
+  const rows=[];
+  for(let i=1;i<lines.length;i++){
+    const cols=lines[i].split(',').map(s=>s.trim());
+    const o={};
+    h.forEach((k,idx)=>{ const v=cols[idx]; const num=Number(v); o[k]=Number.isFinite(num)?num:v;});
+    rows.push(o);
+  }
+  return rows;
+}
+
+const raw = {
+  population: parseCSV(CSV_POPULATION),
+  co2: parseCSV(CSV_CO2),
+  nobel: parseCSV(CSV_NOBEL)
+};
+const sorted = {
+  population: raw.population.slice().sort((a,b)=>a.year-b.year),
+  co2: raw.co2.slice().sort((a,b)=>a.year-b.year),
+  nobel: raw.nobel.slice().sort((a,b)=>a.year-b.year)
+};
+function extentYears(arr){ return [arr[0].year, arr[arr.length-1].year]; }
+const ranges = {
+  population: extentYears(sorted.population),
+  co2: extentYears(sorted.co2),
+  nobel: extentYears(sorted.nobel)
+};
+
+function lerp(a,b,t){ return a+(b-a)*t; }
+function clamp(x,a,b){ return Math.max(a, Math.min(b,x)); }
+function valueAt(ds, year){
+  const arr = sorted[ds];
+  if (year<=arr[0].year) return arr[0].value;
+  if (year>=arr[arr.length-1].year) return arr[arr.length-1].value;
+  let i=0; while(i<arr.length-1 && !(arr[i].year<=year && year<=arr[i+1].year)) i++;
+  const a=arr[i], b=arr[i+1];
+  const t=(year-a.year)/(b.year-a.year);
+  return lerp(a.value,b.value,t);
+}
+
+/* Branch model */
+let branches=[];
+let activeBranchId=null;
+
+function createBranch(name, parent=null){
+  const id='b'+Math.random().toString(36).slice(2,8);
+  const b={ id, name, parent, scales:{ population:new Map(), co2:new Map(), nobel:new Map() } };
+  branches.push(b); refreshBranchUI(); if(!activeBranchId){ setActiveBranch(id); }
+  return b;
+}
+function findBranch(id){ return branches.find(b=>b.id===id); }
+function setActiveBranch(id){
+  activeBranchId=id;
+  const sel=document.getElementById('activeBranch'); if(sel) sel.value=id;
+  renderBranchList(); requestRebuild();
+}
+function mergeBranchesLinear(aId,bId,t=0.5){
+  const a=findBranch(aId), b=findBranch(bId);
+  if(!a||!b||aId===bId) return;
+  const m=createBranch(`${a.name}+${b.name}`, null);
+  ['population','co2','nobel'].forEach(ds=>{
+    const years=new Set([...a.scales[ds].keys(), ...b.scales[ds].keys()]);
+    years.forEach(y=>{
+      const av=a.scales[ds].get(y)??1, bv=b.scales[ds].get(y)??1;
+      const v=lerp(av,bv,t); if(v!==1) m.scales[ds].set(y,v);
+    });
+  });
+  setActiveBranch(m.id);
+}
+function branchScale(ds, year){
+  const b=findBranch(activeBranchId); if(!b) return 1;
+  const keys=[...b.scales[ds].keys()].sort((a,b)=>a-b);
+  if(keys.length===0) return 1;
+  if(year<=keys[0]) return b.scales[ds].get(keys[0])??1;
+  if(year>=keys[keys.length-1]) return b.scales[ds].get(keys[keys.length-1])??1;
+  for(let i=0;i<keys.length-1;i++){
+    const y0=keys[i], y1=keys[i+1]; if(y0<=year && year<=y1){
+      const v0=b.scales[ds].get(y0)??1, v1=b.scales[ds].get(y1)??1;
+      const t=(year-y0)/(y1-y0); return lerp(v0,v1,t);
+    }
+  }
+  return 1;
+}
+
+/* Branch UI */
+function refreshBranchUI(){
+  const sel=document.getElementById('activeBranch');
+  sel.innerHTML=''; branches.forEach(b=>{ const o=document.createElement('option'); o.value=b.id; o.textContent=b.name; sel.appendChild(o); });
+  if(activeBranchId && !branches.some(b=>b.id===activeBranchId) && branches.length) setActiveBranch(branches[0].id);
+  renderBranchList();
+}
+function renderBranchList(){
+  const list=document.getElementById('branchList'); list.innerHTML='';
+  branches.forEach(b=>{
+    const row=document.createElement('div'); row.className='branch-item';
+    const r=document.createElement('input'); r.type='radio'; r.name='bsel'; r.value=b.id; r.checked=(b.id===activeBranchId); r.onchange=()=>setActiveBranch(b.id);
+    const name=document.createElement('input'); name.type='text'; name.value=b.name; name.onchange=()=>{ b.name=name.value; refreshBranchUI(); };
+    const del=document.createElement('button'); del.textContent='Delete'; del.onclick=()=>{
+      const i=branches.findIndex(x=>x.id===b.id); if(i>=0) branches.splice(i,1);
+      if(activeBranchId===b.id) activeBranchId=branches[0]?.id||null;
+      refreshBranchUI(); requestRebuild();
+    };
+    row.appendChild(r); row.appendChild(name); row.appendChild(del);
+    list.appendChild(row);
+  });
+}
+document.getElementById('newBranch').onclick=()=>{
+  const y=state.year|0; const br=createBranch(`Branch @${y}`, activeBranchId);
+  ['population','co2','nobel'].forEach(ds=> br.scales[ds].set(y,1.1));
+  setActiveBranch(br.id);
+};
+document.getElementById('mergeBranches').onclick=()=>{
+  if(branches.length<2) return;
+  const other=branches.find(b=>b.id!==activeBranchId);
+  if(other) mergeBranchesLinear(activeBranchId, other.id, 0.5);
+};
+
+/* Dark mode */
+document.getElementById('darkToggle').onclick=()=>{
+  document.body.classList.toggle('dark');
+  document.body.classList.toggle('light');
+};
+
+/* Canvases and GL */
+const glCanvas=document.getElementById('gl');
+const overlayCanvas=document.getElementById('overlay');
+const miniChartDiv=document.getElementById('miniChart');
+const miniChartCanvas=miniChartDiv.querySelector('canvas');
+const tooltip=document.getElementById('tooltip');
+
+const gl = glCanvas.getContext('webgl2', { antialias:false, alpha:false, powerPreference:'high-performance' });
+if(!gl){ alert('WebGL2 not supported.'); throw new Error('WebGL2 not supported'); }
+
+/* Size */
+function resize(){
+  const dpr=Math.min(window.devicePixelRatio||1,2);
+  const rect=glCanvas.getBoundingClientRect();
+  const w=Math.max(1, rect.width|0);
+  const h=Math.max(1, rect.height|0);
+  const W=(w*dpr)|0, H=(h*dpr)|0;
+  if(glCanvas.width!==W || glCanvas.height!==H){
+    glCanvas.width=W; glCanvas.height=H; gl.viewport(0,0,W,H);
+  }
+  if(overlayCanvas.width!==W || overlayCanvas.height!==H){
+    overlayCanvas.width=W; overlayCanvas.height=H;
+  }
+}
+window.addEventListener('resize', resize);
+
+/* Controls & State */
+const state = {
+  dataset:'population',
+  year:ranges.population[0],
+  targetYear:ranges.population[0],
+  yaw:0, pitch:0,
+  cameraZ:120,
+  dragging:false, shiftDrag:false, lastX:0, lastY:0,
+  throttle:1, fps:0,
+  pinchDist:null
+};
+document.getElementById('datasetSelect').onchange=(e)=>{
+  state.dataset=e.target.value;
+  const [minY,maxY]=ranges[state.dataset];
+  state.targetYear=clamp(state.targetYear,minY,maxY);
+  state.year=clamp(state.year,minY,maxY);
+  document.getElementById('yearBadge').textContent=`Year: ${Math.round(state.year)}`;
+  requestRebuild();
+};
+glCanvas.addEventListener('wheel', (e)=>{
+  e.preventDefault();
+  const [minY,maxY]=ranges[state.dataset];
+  state.targetYear=clamp(state.targetYear - Math.sign(e.deltaY)*1.0, minY, maxY);
+},{passive:false});
+glCanvas.addEventListener('pointerdown',(e)=>{
+  glCanvas.setPointerCapture(e.pointerId); state.dragging=true; state.shiftDrag=e.shiftKey; state.lastX=e.clientX; state.lastY=e.clientY;
+});
+glCanvas.addEventListener('pointermove',(e)=>{
+  if(!state.dragging) return;
+  const dx=e.clientX-state.lastX, dy=e.clientY-state.lastY;
+  if(state.shiftDrag){
+    const y=Math.round(state.year/10)*10;
+    const b=findBranch(activeBranchId);
+    if(b){ const ds=state.dataset; const prev=b.scales[ds].get(y)??1; b.scales[ds].set(y, clamp(prev+dx*0.002, 0.1,3.0)); renderBranchList(); requestRebuild(); }
+  }else{
+    state.yaw+=dx*0.003; state.pitch=clamp(state.pitch+dy*0.003,-1.2,1.2);
+  }
+  state.lastX=e.clientX; state.lastY=e.clientY;
+});
+glCanvas.addEventListener('pointerup',()=>{ state.dragging=false; state.shiftDrag=false; });
+/* Touch pinch */
+glCanvas.addEventListener('touchstart',(e)=>{
+  if(e.touches.length===2){
+    const dx=e.touches[0].clientX-e.touches[1].clientX;
+    const dy=e.touches[0].clientY-e.touches[1].clientY;
+    state.pinchDist=Math.hypot(dx,dy);
+  }
+},{passive:true});
+glCanvas.addEventListener('touchmove',(e)=>{
+  if(e.touches.length===2 && state.pinchDist!=null){
+    const dx=e.touches[0].clientX-e.touches[1].clientX;
+    const dy=e.touches[0].clientY-e.touches[1].clientY;
+    const dist=Math.hypot(dx,dy);
+    state.cameraZ=clamp(state.cameraZ-(dist-state.pinchDist)*0.02, 30, 400);
+    state.pinchDist=dist;
+  }
+},{passive:true});
+glCanvas.addEventListener('touchend',()=>{ state.pinchDist=null; },{passive:true});
+
+/* GL Shaders */
+function compile(type,src){
+  const s=gl.createShader(type); gl.shaderSource(s,src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){ console.error(gl.getShaderInfoLog(s)); throw new Error('Shader compile'); }
+  return s;
+}
+const vs = `#version 300 es
+precision highp float;
+layout(location=0) in float aYear;
+layout(location=1) in float aMag;
+layout(location=2) in vec3 aJitter;
+uniform mat4 uProj, uView;
+uniform float uPointScale;
+out float vMag;
+void main(){
+  vec3 pos=aJitter; pos.z+=aYear;
+  vec4 vpos=uView*vec4(pos,1.0);
+  gl_Position=uProj*vpos;
+  gl_PointSize=clamp(uPointScale*(aMag*0.9+0.1)/max(0.1,-vpos.z), 1.0, 8.0);
+  vMag=aMag;
+}`;
+const fs = `#version 300 es
+precision highp float;
+in float vMag;
+out vec4 o;
+void main(){
+  vec2 uv=gl_PointCoord*2.0-1.0;
+  float r=dot(uv,uv);
+  float alpha=smoothstep(1.0,0.0,r);
+  vec3 color=mix(vec3(0.4,0.7,1.0), vec3(1.0,0.8,0.2), vMag);
+  o=vec4(color, alpha*(0.4+0.6*vMag));
+}`;
+const program=(()=>{ const p=gl.createProgram(); gl.attachShader(p,compile(gl.VERTEX_SHADER,vs)); gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fs)); gl.linkProgram(p); if(!gl.getProgramParameter(p,gl.LINK_STATUS)){ console.error(gl.getProgramInfoLog(p)); throw new Error('Link'); } return p; })();
+const uni={
+  uProj: gl.getUniformLocation(program,'uProj'),
+  uView: gl.getUniformLocation(program,'uView'),
+  uPointScale: gl.getUniformLocation(program,'uPointScale')
+};
+/* VAO + buffers (instanced points) */
+const vao=gl.createVertexArray(); gl.bindVertexArray(vao);
+const bufYear=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, bufYear); gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,1,gl.FLOAT,false,0,0); gl.vertexAttribDivisor(0,1);
+const bufMag=gl.createBuffer();  gl.bindBuffer(gl.ARRAY_BUFFER, bufMag);  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1,1,gl.FLOAT,false,0,0); gl.vertexAttribDivisor(1,1);
+const bufJit=gl.createBuffer();  gl.bindBuffer(gl.ARRAY_BUFFER, bufJit);  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2,3,gl.FLOAT,false,0,0); gl.vertexAttribDivisor(2,1);
+gl.bindVertexArray(null);
+gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+gl.clearColor(0.03,0.05,0.08,1);
+
+/* Matrices */
+function perspective(fovy,aspect,near,far){
+  const f=1/Math.tan(fovy/2), out=new Float32Array(16);
+  out[0]=f/aspect; out[5]=f; out[10]=(far+near)/(near-far); out[11]=-1; out[14]=(2*far*near)/(near-far); return out;
+}
+function lookAt(eye,target,up){
+  const z=norm(sub(eye,target)), x=norm(cross(up,z)), y=cross(z,x), m=new Float32Array(16);
+  m[0]=x[0]; m[1]=y[0]; m[2]=z[0]; m[3]=0;
+  m[4]=x[1]; m[5]=y[1]; m[6]=z[1]; m[7]=0;
+  m[8]=x[2]; m[9]=y[2]; m[10]=z[2]; m[11]=0;
+  m[12]=-dot(x,eye); m[13]=-dot(y,eye); m[14]=-dot(z,eye); m[15]=1; return m;
+}
+function sub(a,b){ return [a[0]-b[0],a[1]-b[1],a[2]-b[2]]; }
+function cross(a,b){ return [a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]]; }
+function dot(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+function norm(a){ const l=Math.hypot(a[0],a[1],a[2])||1; return [a[0]/l,a[1]/l,a[2]/l]; }
+
+/* Instances */
+let instanceCount=0;
+let lastBuiltDataset='population';
+let lastBuiltYear=NaN;
+let lastMin=0, lastMax=1;
+
+function rebuildInstances(){
+  const ds=state.dataset;
+  const [ymin,ymax]=ranges[ds];
+
+  // compute normalization at bounds
+  const minVal=valueAt(ds, ymin)*branchScale(ds,ymin);
+  const maxVal=valueAt(ds, ymax)*branchScale(ds,ymax);
+  lastMin=minVal; lastMax=maxVal;
+
+  const steps=(ymax-ymin+1);
+  const target=40000;
+  const perYear=Math.max(30, Math.floor(target/Math.max(1,steps)));
+
+  const years=[]; const mags=[]; const jits=[];
+  for(let y=ymin; y<=ymax; y++){
+    const val=valueAt(ds,y)*branchScale(ds,y);
+    const mag=(val-minVal)/Math.max(1e-6,(maxVal-minVal));
+    const count=Math.max(6, Math.floor(perYear*(0.2+0.8*mag)));
+    for(let i=0;i<count;i++){
+      years.push((y - state.year) * 0.6);
+      mags.push(clamp(mag + (Math.random()-0.5)*0.05, 0, 1));
+      // random sphere
+      const u=Math.random()*2-1; const t=Math.random()*Math.PI*2;
+      const r=Math.random()*5+1.5; const s=Math.sqrt(1-u*u);
+      const x=s*Math.cos(t)*r, z=s*Math.sin(t)*r, vy=u*r*0.6;
+      jits.push(x, vy, z);
+    }
+  }
+  instanceCount=years.length;
+  document.getElementById('pointsBadge').textContent=`Points: ${instanceCount.toLocaleString()}`;
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufYear); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(years), gl.DYNAMIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufMag);  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(mags), gl.DYNAMIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufJit);  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(jits), gl.STATIC_DRAW);
+
+  lastBuiltDataset=ds;
+  lastBuiltYear=state.year;
+}
+let needRebuild=true;
+function requestRebuild(){ needRebuild=true; }
+
+/* Overlay hover and mini-chart */
+let hoverPos=null;
+overlayCanvas.addEventListener('mousemove', (e)=>{
+  const r=overlayCanvas.getBoundingClientRect();
+  hoverPos={ x:e.clientX-r.left, y:e.clientY-r.top, clientX:e.clientX, clientY:e.clientY };
+});
+overlayCanvas.addEventListener('mouseleave', ()=>{ hoverPos=null; miniChartDiv.style.display='none'; tooltip.style.display='none'; });
+
+function drawMiniChart(ds, year, clientX, clientY){
+  const ctx=miniChartCanvas.getContext('2d');
+  const dpr=Math.min(window.devicePixelRatio||1,2);
+  const wcss=miniChartDiv.clientWidth, hcss=miniChartDiv.clientHeight;
+  miniChartCanvas.width=Math.max(1,(wcss*dpr)|0);
+  miniChartCanvas.height=Math.max(1,(hcss*dpr)|0);
+  const w=miniChartCanvas.width, h=miniChartCanvas.height;
+
+  const light=document.body.classList.contains('light');
+  ctx.clearRect(0,0,w,h);
+  ctx.fillStyle=light?'#ffffff':'#0f1724'; ctx.fillRect(0,0,w,h);
+  ctx.strokeStyle=light?'#cbd6ea':'#2b3d5f'; ctx.strokeRect(0.5,0.5,w-1,h-1);
+
+  const y0=Math.max(ranges[ds][0], Math.floor(year-50));
+  const y1=Math.floor(year);
+  const pts=[]; let vmin=Infinity, vmax=-Infinity;
+  for(let yy=y0; yy<=y1; yy++){
+    const v=valueAt(ds,yy)*branchScale(ds,yy);
+    vmin=Math.min(vmin,v); vmax=Math.max(vmax,v); pts.push([yy,v]);
+  }
+  const pad=10*dpr;
+  ctx.strokeStyle='#4ea1ff'; ctx.lineWidth=2*dpr; ctx.beginPath();
+  for(let i=0;i<pts.length;i++){
+    const t=(pts[i][0]-y0)/Math.max(1,(y1-y0));
+    const vn=(pts[i][1]-vmin)/Math.max(1e-6,(vmax-vmin));
+    const x=pad+t*(w-2*pad), y=h-(pad+vn*(h-2*pad));
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+  ctx.fillStyle=light?'#2c3c5b':'#9fb3d2';
+  ctx.font=`${12*dpr}px system-ui`;
+  ctx.fillText(`${ds.toUpperCase()} trend (${y0}-${y1})`, 12*dpr, 16*dpr);
+
+  miniChartDiv.style.left=(clientX+12)+'px';
+  miniChartDiv.style.top=(clientY+12)+'px';
+  miniChartDiv.style.display='block';
+  tooltip.textContent=`${ds} @ ${Math.round(year)}`;
+  tooltip.style.left=(clientX+12)+'px';
+  tooltip.style.top=(clientY-8)+'px';
+  tooltip.style.display='block';
+}
+
+/* FPS throttling */
+let frames=0, lastFpsTs=performance.now();
+function updateFps(now){
+  frames++; if(now-lastFpsTs>500){ const fps=Math.round(frames*1000/(now-lastFpsTs)); frames=0; lastFpsTs=now;
+    state.fps=fps; document.getElementById('fpsBadge').textContent=`FPS: ${fps}`;
+    state.throttle = fps<40 ? 2 : 1;
+  }
+}
+
+/* Render loop */
+function render(now){
+  requestAnimationFrame(render);
+  if((Math.floor(now/16)%state.throttle)!==0) return;
+
+  // easing year
+  state.year = lerp(state.year, state.targetYear, 0.15);
+  document.getElementById('yearBadge').textContent=`Year: ${Math.round(state.year)}`;
+
+  // rebuild on need or big time shift or dataset change
+  if (needRebuild || lastBuiltDataset!==state.dataset || Math.abs(lastBuiltYear - state.year) > 2){
+    rebuildInstances(); needRebuild=false;
+  }
+
+  resize();
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(program);
+  gl.bindVertexArray(vao);
+
+  const aspect=glCanvas.width/glCanvas.height;
+  const proj=perspective(60*Math.PI/180, aspect, 0.1, 2000);
+  const dir=[ Math.cos(state.pitch)*Math.sin(state.yaw), Math.sin(state.pitch), Math.cos(state.pitch)*Math.cos(state.yaw) ];
+  const eye=[ -dir[0]*state.cameraZ, -dir[1]*state.cameraZ, -dir[2]*state.cameraZ ];
+  const view=lookAt(eye,[0,0,0],[0,1,0]);
+
+  gl.uniformMatrix4fv(uni.uProj,false,proj);
+  gl.uniformMatrix4fv(uni.uView,false,view);
+  gl.uniform1f(uni.uPointScale, 120.0);
+
+  // Simple frustum-like culling by point count reduction when far away (cheap)
+  const drawCount=instanceCount;
+  gl.drawArraysInstanced(gl.POINTS, 0, 1, drawCount);
+
+  // Overlay
+  const ctx=overlayCanvas.getContext('2d');
+  ctx.clearRect(0,0,overlayCanvas.width, overlayCanvas.height);
+  ctx.strokeStyle='rgba(100,150,220,0.25)'; ctx.beginPath();
+  ctx.moveTo(overlayCanvas.width/2,0); ctx.lineTo(overlayCanvas.width/2,overlayCanvas.height); ctx.stroke();
+
+  if(hoverPos){
+    const dpr=Math.min(window.devicePixelRatio||1,2);
+    const cx=overlayCanvas.width/2/dpr;
+    if(Math.abs(hoverPos.x - cx) < 60){
+      drawMiniChart(state.dataset, state.year, hoverPos.clientX, hoverPos.clientY);
+    } else {
+      miniChartDiv.style.display='none'; tooltip.style.display='none';
+    }
+  }
+
+  updateFps(now);
+}
+
+/* Init */
+function init(){
+  document.getElementById('yearBadge').textContent='Year: --';
+  const main=createBranch('Main'); setActiveBranch(main.id);
+  resize();
+  requestRebuild();
+  requestAnimationFrame(render);
+}
+init();
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+feat: Add new projects and refactor repository structure
+
+This commit adds several new LLM stress test projects and significantly refactors the repository's organization for better clarity and scalability.
+
+### New Projects Added:
+- **Music Synthesizer:** A prompt to generate a piano-roll UI with live music generation via a WASM-ported WaveNet.
+- **Time-Travel Dashboard:** A prompt for a 3D interactive data dashboard visualizing historical data.
+- **Poetry Generator:** A complex prompt for a short story with multiple stylistic and structural constraints.
+- **Solidity Generator:** A prompt to create a rule-based system for generating Solidity smart contracts from plain English.
+
+### Refactoring and Enhancements:
+- **Standardized Project Structure:**
+  - Implemented a consistent `output/` subdirectory for generated files.
+  - Added a `metadata.json` file to each project for structured data.
+  - Renamed project directories for brevity and consistency.
+- **Enhanced README.md:**
+  - Converted the project list into a detailed table with descriptions, tags, and demo links.
+  - Added a Table of Contents, License section, and a more prominent Disclaimer.
+- **Project Scaffolding Script:**
+  - Added `create_project.sh` to automate the creation of new projects with the standard structure.
