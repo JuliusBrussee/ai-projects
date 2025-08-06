@@ -1,18 +1,21 @@
+Below is a single self-contained HTML file. It includes the piano-roll UI, controls, worker-based generator, and a piano-like synth for playback and export. Save as index.html and open it.
+
+```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta http-equiv="Permissions-Policy" content="interest-cohort=()">
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>WASM WaveNet Piano Roll</title>
+<title>WASM WaveNet Piano Roll (Piano-like)</title>
 <style>
   html, body { margin:0; height:100%; background:#111; color:#eee; font-family:system-ui, sans-serif; }
-  #topbar { display:flex; align-items:center; gap:12px; padding:10px; background:#1b1b1b; border-bottom:1px solid #333; }
+  #topbar { display:flex; align-items:center; gap:12px; padding:10px; background:#1b1b1b; border-bottom:1px solid #333; flex-wrap: wrap; }
   label { font-size:14px; }
   input[type=range] { width:160px; }
   select, button, input[type=number] { background:#222; color:#eee; border:1px solid #444; padding:6px; border-radius:6px; }
   button { cursor:pointer; }
-  #rollWrap { position:relative; height: calc(100% - 60px); }
+  #rollWrap { position:relative; height: calc(100% - 72px); }
   #pianoRoll { display:block; width:100%; height:100%; background:#0b0b0b; }
   #status { font-size:12px; color:#9f9; margin-left:auto; }
   #transport { display:flex; gap:8px; }
@@ -22,6 +25,7 @@
 </head>
 <body>
   <div id="topbar">
+    <div style="background-color: #ffc107; color: #000; padding: 10px; text-align: center; width: 100%;"><b>Disclaimer:</b> The audio produced by this synthesizer is experimental and may be high-pitched and unpleasant to some listeners. Please listen at a low volume.</div>
     <div class="row">
       <label>Tempo <input id="tempo" type="number" min="40" max="220" value="120" step="1" style="width:64px"></label>
       <label>Key
@@ -41,7 +45,7 @@
       <button id="exportMidi">Export MIDI</button>
       <button id="exportWav">Export WAV</button>
     </div>
-    <div id="legend">Velocity: blue=soft → red=hard</div>
+    <div id="legend">Velocity color: blue (soft) → red (hard)</div>
     <div id="status">Loading model…</div>
   </div>
   <div id="rollWrap"><canvas id="pianoRoll"></canvas></div>
@@ -50,14 +54,10 @@
 (function(){
   'use strict';
 
-  // Configuration
-  const NOTE_MIN = 21;   // A0
-  const NOTE_MAX = 108;  // C8
-  const NUM_KEYS = NOTE_MAX - NOTE_MIN + 1;
-  const PPQ = 480; // pulses per quarter
-  const BAR_BEATS = 4;
-  const EVOLVE_BARS = 8;
-  const MAX_BUFFER_SEC = 60; // store recent notes/audio for export and seeding
+  // Config
+  const NOTE_MIN = 21, NOTE_MAX = 108, NUM_KEYS = NOTE_MAX - NOTE_MIN + 1;
+  const SAFE_LO = 48, SAFE_HI = 84; // C3..C6
+  const PPQ = 480, BAR_BEATS = 4, EVOLVE_BARS = 8;
 
   // DOM
   const $roll = document.getElementById('pianoRoll');
@@ -72,7 +72,7 @@
   const $exportWav = document.getElementById('exportWav');
   const $status = document.getElementById('status');
 
-  // Canvas setup
+  // Canvas
   const ctx = $roll.getContext('2d');
   function resizeCanvas() {
     const dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -83,101 +83,39 @@
   window.addEventListener('resize', resizeCanvas);
 
   // Audio
-  let audioCtx = null;
-  let mainGain = null;
+  let audioCtx = null, mainGain = null, masterComp = null, masterEQ = null;
 
-  // Shared timing
-  let isPlaying = false;
-  let startTime = 0; // audioContext time at transport start
-  let songPos = 0;   // seconds since start
-  let bpm = parseFloat($tempo.value);
-  let secPerBeat = 60 / bpm;
-  let barLenSec = BAR_BEATS * secPerBeat;
+  // Transport
+  let isPlaying = false, startTime = 0, songPos = 0;
+  let bpm = parseFloat($tempo.value), secPerBeat = 60 / bpm, barLenSec = BAR_BEATS * secPerBeat;
   let evolveCounter = 0;
 
-  // Note/event storage
-  const activeNotes = new Map(); // midi -> {start, velocity}
+  // Notes
   const noteEvents = []; // {t, midi, velocity, dur}
-  const recentNotes = []; // sliding window for last 2 seconds
 
-  // Audio render buffer (for WAV)
-  let renderLeft = [];
-  let renderRight = [];
+  // Worker
+  let worker = null, modelReady = false;
 
-  // Worker and model
-  let worker = null;
-  let sharedCtrl = null; // SharedArrayBuffer for control ring (if available)
-  let modelReady = false;
-
-  // Simple RNG
+  // Utils
   const rng = (seed => () => (seed = (seed*1664525 + 1013904223)>>>0) / 4294967296)(0xC0FFEE);
+  function velColor(v){ const t=v/127; const r=Math.floor(255*t), g=Math.floor(80*(1-t)), b=Math.floor(255*(1-t)); return `rgb(${r},${g},${b})`; }
+  function timeToX(tNow, tEvent){ const pxPerSec=120; return $roll.clientWidth - (tNow - tEvent) * pxPerSec; }
+  function noteToY(midi){ const h=$roll.clientHeight; const row=NOTE_MAX - midi; return (row / NUM_KEYS) * h; }
+  function noteHeight(){ return $roll.clientHeight / NUM_KEYS; }
 
-  // Utility: MIDI note name
-  function midiName(m) {
-    const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-    return names[m % 12] + Math.floor(m/12 - 1);
-  }
-
-  // Scale helper based on key + valence (major/minor bias)
-  function currentScale() {
-    const keyName = $key.value;
-    const rootMap = {C:0,'C#':1,D:2,'D#':3,E:4,F:5,'F#':6,G:7,'G#':8,A:9,'A#':10,B:11};
-    const root = rootMap[keyName] || 0;
-    const maj = [0,2,4,5,7,9,11];
-    const min = [0,2,3,5,7,8,10];
-    const v = parseFloat($valence.value);
-    const scale = (v >= 0.5) ? maj : min;
-    return scale.map(s => (s + root + 12) % 12);
-  }
-
-  // Map velocity 0..127 -> color
-  function velColor(v) {
-    const t = v/127;
-    const r = Math.floor(255 * t);
-    const g = Math.floor(80 * (1-t));
-    const b = Math.floor(255 * (1-t));
-    return `rgb(${r},${g},${b})`;
-  }
-
-  // Scheduling
-  function timeToX(tNow, tEvent) {
-    const pxPerSec = 120; // horizontal speed
-    return $roll.clientWidth - (tNow - tEvent) * pxPerSec;
-  }
-  function noteToY(midi) {
-    const h = $roll.clientHeight;
-    const row = NOTE_MAX - midi;
-    return (row / NUM_KEYS) * h;
-  }
-  function noteHeight() {
-    return $roll.clientHeight / NUM_KEYS;
-  }
-
-  // Drawing
+  // Draw
   function draw() {
     const tNow = isPlaying && audioCtx ? audioCtx.currentTime - startTime : songPos;
     ctx.clearRect(0,0,$roll.clientWidth,$roll.clientHeight);
-
-    // Grid
-    const h = $roll.clientHeight;
-    const w = $roll.clientWidth;
-    ctx.strokeStyle = '#222';
-    ctx.lineWidth = 1;
-    const pxPerSec = 120;
-    const secGrid = secPerBeat / 4; // 16th
-    for (let x = w; x >= 0; x -= secGrid * pxPerSec) {
-      ctx.beginPath();
-      ctx.moveTo(x,0); ctx.lineTo(x,h); ctx.stroke();
-    }
-    // Key stripes
+    const h = $roll.clientHeight, w = $roll.clientWidth, pxPerSec = 120;
+    const secGrid = secPerBeat / 4;
+    ctx.strokeStyle = '#222'; ctx.lineWidth = 1;
+    for (let x = w; x >= 0; x -= secGrid * pxPerSec) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,h); ctx.stroke(); }
     for (let m = NOTE_MIN; m <= NOTE_MAX; m++) {
       const y = noteToY(m);
       const isBlack = [1,3,6,8,10].includes(m % 12);
-      ctx.fillStyle = isBlack ? 'rgba(255,255,255,0.03)' : 'transparent';
-      if (isBlack) ctx.fillRect(0, y, w, noteHeight());
+      if (isBlack) { ctx.fillStyle='rgba(255,255,255,0.03)'; ctx.fillRect(0, y, w, noteHeight()); }
     }
-
-    // Notes
     for (const ev of noteEvents) {
       const x = timeToX(tNow, ev.t);
       const durPx = ev.dur * pxPerSec;
@@ -186,344 +124,296 @@
       ctx.fillStyle = velColor(ev.velocity);
       ctx.fillRect(x, y+1, Math.max(1, durPx), Math.max(1, noteHeight()-2));
     }
-
-    // Now-line
-    ctx.strokeStyle = '#0f0';
-    ctx.beginPath(); ctx.moveTo(w-1,0); ctx.lineTo(w-1,h); ctx.stroke();
-
+    ctx.strokeStyle = '#0f0'; ctx.beginPath(); ctx.moveTo(w-1,0); ctx.lineTo(w-1,h); ctx.stroke();
     requestAnimationFrame(draw);
   }
 
-  // Transport
-  function setTempo(v){
-    bpm = Math.max(40, Math.min(220, parseFloat(v)||120));
-    secPerBeat = 60 / bpm;
-    barLenSec = BAR_BEATS * secPerBeat;
-    postCtrl({type:'tempo', bpm});
+  function setTempo(v){ bpm = Math.max(40, Math.min(220, parseFloat(v)||120)); secPerBeat = 60 / bpm; barLenSec = BAR_BEATS * secPerBeat; postCtrl({type:'tempo', bpm}); }
+
+  function setupAudioGraph() {
+    mainGain = audioCtx.createGain(); mainGain.gain.value = 0.6;
+    masterComp = audioCtx.createDynamicsCompressor();
+    masterComp.threshold.value = -16; masterComp.knee.value = 24; masterComp.ratio.value = 3.5;
+    masterComp.attack.value = 0.003; masterComp.release.value = 0.12;
+    masterEQ = audioCtx.createBiquadFilter(); masterEQ.type = 'lowpass'; masterEQ.frequency.value = 8000; masterEQ.Q.value = 0.5;
+    mainGain.connect(masterComp).connect(masterEQ).connect(audioCtx.destination);
   }
 
-  function startAudio() {
-    if (!audioCtx) {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
-      mainGain = audioCtx.createGain();
-      mainGain.gain.value = 0.85;
-      mainGain.connect(audioCtx.destination);
-      // Create a ScriptProcessor-like worklet for playout if needed
-    }
-  }
+  function startAudio(){ if (!audioCtx) { audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 }); setupAudioGraph(); } }
 
-  function play() {
-    startAudio();
-    if (isPlaying) return;
-    isPlaying = true;
-    startTime = audioCtx.currentTime - songPos;
-    evolveCounter = 0;
-    postCtrl({type:'play', t0: startTime});
-    tickGenerate(); // kick generator
-  }
+  function play(){ startAudio(); if (isPlaying) return; isPlaying = true; startTime = audioCtx.currentTime - songPos; evolveCounter = 0; postCtrl({type:'play', t0: startTime}); tickGenerate(); }
+  function stop(){ if (!isPlaying) return; isPlaying = false; songPos = audioCtx.currentTime - startTime; postCtrl({type:'stop'}); }
 
-  function stop() {
-    if (!isPlaying) return;
-    isPlaying = false;
-    songPos = audioCtx.currentTime - startTime;
-    postCtrl({type:'stop'});
-  }
-
-  $play.onclick = play;
-  $stop.onclick = stop;
+  $play.onclick = play; $stop.onclick = stop;
   $tempo.onchange = e => setTempo(e.target.value);
   $key.onchange = () => postCtrl({type:'key', key: $key.value});
   $valence.oninput = () => postCtrl({type:'mood', valence: parseFloat($valence.value), arousal: parseFloat($arousal.value)});
   $arousal.oninput = () => postCtrl({type:'mood', valence: parseFloat($valence.value), arousal: parseFloat($arousal.value)});
   $evolve.onclick = () => evolve(true);
 
-  // Evolution: mutate composition every 8 bars or on demand
-  function evolve(force=false) {
-    if (!force) {
-      evolveCounter++;
-      if (evolveCounter < EVOLVE_BARS) return;
-      evolveCounter = 0;
-    }
-    // Send a hint to worker to increase mutation rate for next segment
-    postCtrl({type:'evolve'});
-  }
+  function evolve(force=false){ if (!force) { evolveCounter++; if (evolveCounter < EVOLVE_BARS) return; evolveCounter = 0; } postCtrl({type:'evolve'}); }
 
-  // Generation loop: request a short chunk based on last 2s of notes
+  // Generation
   let genScheduled = false;
-  function tickGenerate() {
+  function tickGenerate(){
     if (!isPlaying || !modelReady) return;
     if (genScheduled) return;
     genScheduled = true;
-    // Collect seed: last 2 seconds of events (symbolic) and recent audio tail len
     const tNow = audioCtx.currentTime - startTime;
     const seedStart = Math.max(0, tNow - 2.0);
     const seedNotes = noteEvents.filter(ev => ev.t + ev.dur >= seedStart && ev.t <= tNow)
       .map(ev => ({t: ev.t - seedStart, midi: ev.midi, vel: ev.velocity, dur: Math.max(0, Math.min(ev.dur, tNow - ev.t))}));
-    // Request 1 beat of new content to keep latency low
-    const reqDur = Math.max(0.2, Math.min(0.5, secPerBeat)); // ~0.2-0.5s
+    const reqDur = Math.max(0.2, Math.min(0.5, secPerBeat));
     postCtrl({type:'generate', seedNotes, seedLen: tNow - seedStart, reqDur, tNow});
   }
-
-  // Periodic bar tracking for evolve
   setInterval(() => {
     if (!isPlaying || !audioCtx) return;
     const t = audioCtx.currentTime - startTime;
     const bars = Math.floor(t / barLenSec);
-    if (bars > 0 && (t % barLenSec) < 0.05) {
-      evolve();
-    }
-    // Request more generation
+    if (bars > 0 && (t % barLenSec) < 0.05) evolve();
     tickGenerate();
   }, 30);
 
-  // MIDI/WAV export
+  // Export
   $exportMidi.onclick = () => {
     const bytes = buildMIDI(noteEvents, bpm);
     downloadBlob(new Blob([new Uint8Array(bytes)], {type:'audio/midi'}), 'composition.mid');
   };
   $exportWav.onclick = async () => {
     const sr = audioCtx ? audioCtx.sampleRate : 48000;
-    const {L, R} = await renderOfflineAudio(noteEvents, sr);
+    const {L, R} = await renderOfflinePianoish(noteEvents, sr);
+    normalizeBuffers([L,R], 0.89);
     const wav = encodeWAV([L, R], sr);
     downloadBlob(new Blob([wav], {type:'audio/wav'}), 'composition.wav');
   };
 
-  function downloadBlob(blob, name) {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 0);
-  }
+  function downloadBlob(blob, name){ const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 0); }
 
-  // MIDI builder (Type 0, single track)
+  // MIDI
   function buildMIDI(events, tempoBPM) {
-    // Convert to delta-time ticks (PPQ)
     const tempoUSq = Math.round(60000000 / tempoBPM);
     const evs = [];
-    for (const ev of events) {
-      evs.push({t: ev.t, type:'on', midi: ev.midi, vel: Math.max(1, ev.velocity)});
-      evs.push({t: ev.t + ev.dur, type:'off', midi: ev.midi, vel: 0});
-    }
+    for (const ev of events) { evs.push({t: ev.t, type:'on', midi: ev.midi, vel: Math.max(1, ev.velocity)}); evs.push({t: ev.t + ev.dur, type:'off', midi: ev.midi, vel: 0}); }
     evs.sort((a,b)=>a.t-b.t || (a.type==='off')-(b.type==='off'));
-    let lastT = 0;
-    const track = [];
-    // Tempo meta
-    track.push(...writeVarInt(0), 0xFF, 0x51, 0x03,
-      (tempoUSq>>16)&0xFF, (tempoUSq>>8)&0xFF, tempoUSq&0xFF);
+    let lastT = 0; const track = [];
+    track.push(...writeVarInt(0), 0xFF, 0x51, 0x03, (tempoUSq>>16)&0xFF, (tempoUSq>>8)&0xFF, tempoUSq&0xFF);
     for (const e of evs) {
       const dtSec = Math.max(0, e.t - lastT);
       const dtTicks = Math.round(dtSec * (PPQ * tempoBPM / 60));
       track.push(...writeVarInt(dtTicks));
       lastT = e.t;
-      if (e.type==='on') {
-        track.push(0x90, e.midi&0x7F, Math.max(1, Math.min(127, e.vel)));
-      } else {
-        track.push(0x80, e.midi&0x7F, 0);
-      }
+      if (e.type==='on') track.push(0x90, e.midi&0x7F, Math.max(1, Math.min(127, e.vel)));
+      else track.push(0x80, e.midi&0x7F, 0);
     }
     track.push(...writeVarInt(0), 0xFF, 0x2F, 0x00);
-    const header = [
-      0x4D,0x54,0x68,0x64, // MThd
-      0x00,0x00,0x00,0x06,
-      0x00,0x00, // format 0
-      0x00,0x01, // ntrks
-      (PPQ>>8)&0xFF, PPQ&0xFF
-    ];
-    const trackChunk = [
-      0x4D,0x54,0x72,0x6B, // MTrk
-      ...write32(track.length),
-      ...track
-    ];
+    const header = [0x4D,0x54,0x68,0x64, 0x00,0x00,0x00,0x06, 0x00,0x00, 0x00,0x01, (PPQ>>8)&0xFF, PPQ&0xFF];
+    const trackChunk = [0x4D,0x54,0x72,0x6B, ...write32(track.length), ...track];
     return new Uint8Array([...header, ...trackChunk]);
 
-    function writeVarInt(v) {
-      const bytes = [];
-      let buffer = v & 0x7F;
-      while ((v >>= 7)) { buffer <<= 8; buffer |= ((v & 0x7F) | 0x80); }
-      for (;;) { bytes.push(buffer & 0xFF); if (buffer & 0x80) buffer >>= 8; else break; }
-      return bytes.reverse();
-    }
-    function write32(v) { return [(v>>>24)&0xFF,(v>>>16)&0xFF,(v>>>8)&0xFF,v&0xFF]; }
+    function writeVarInt(v){ const bytes=[]; let buffer=v & 0x7F; while ((v >>= 7)) { buffer <<= 8; buffer |= ((v & 0x7F) | 0x80); } for(;;){ bytes.push(buffer & 0xFF); if (buffer & 0x80) buffer >>= 8; else break; } return bytes.reverse(); }
+    function write32(v){ return [(v>>>24)&0xFF,(v>>>16)&0xFF,(v>>>8)&0xFF,v&0xFF]; }
   }
 
-  // Offline render: very simple synth (sine+env) to make a WAV; replace with model audio if available
-  async function renderOfflineAudio(events, sampleRate) {
+  // Piano-like synth live
+  function scheduleTone(ev) {
+    if (!audioCtx) return;
+    const midi = Math.max(SAFE_LO, Math.min(SAFE_HI, ev.midi));
+    const t0 = ev.t + startTime;
+    const vel = Math.max(0.05, ev.velocity/127);
+    const f0 = 440 * Math.pow(2, (midi - 69)/12);
+
+    const osc1 = audioCtx.createOscillator(), osc2 = audioCtx.createOscillator(), osc3 = audioCtx.createOscillator();
+    osc1.type = 'triangle'; osc2.type = 'triangle'; osc3.type = 'triangle';
+    osc1.frequency.setValueAtTime(f0, t0); osc2.frequency.setValueAtTime(f0 * 0.997, t0); osc3.frequency.setValueAtTime(f0 * 1.003, t0);
+    osc1.frequency.exponentialRampToValueAtTime(f0, t0 + 0.02);
+    osc2.frequency.exponentialRampToValueAtTime(f0, t0 + 0.02);
+    osc3.frequency.exponentialRampToValueAtTime(f0, t0 + 0.02);
+
+    const lp = audioCtx.createBiquadFilter();
+    lp.type = 'lowpass';
+    const open = 2200 * (0.7 + 0.6*vel);
+    lp.frequency.setValueAtTime(open, t0); lp.Q.setValueAtTime(0.7, t0);
+
+    const noiseDur = Math.min(0.012, 0.006 + 0.01*vel);
+    const noise = audioCtx.createBufferSource();
+    const nb = audioCtx.createBuffer(1, Math.ceil(noiseDur*audioCtx.sampleRate), audioCtx.sampleRate);
+    const nd = nb.getChannelData(0); for (let i=0;i<nd.length;i++){ nd[i] = (Math.random()*2-1) * 0.2; }
+    noise.buffer = nb;
+    const noiseHP = audioCtx.createBiquadFilter(); noiseHP.type='highpass'; noiseHP.frequency.value=1500; noiseHP.Q.value=0.7;
+    const noiseGain = audioCtx.createGain(); noiseGain.gain.setValueAtTime(0.1*vel, t0);
+
+    const amp = audioCtx.createGain();
+    const a = 0.003 + 0.002*(1-vel), r = 0.18;
+    const peak = 0.22 * vel;
+    amp.gain.setValueAtTime(0, t0);
+    amp.gain.linearRampToValueAtTime(peak, t0 + a);
+    amp.gain.setValueAtTime(peak * 0.92, t0 + Math.max(a, ev.dur*0.7));
+    amp.gain.linearRampToValueAtTime(0.0, t0 + ev.dur + r);
+
+    const bodyMix = audioCtx.createGain(); bodyMix.gain.value = 1.0;
+    osc1.connect(bodyMix); osc2.connect(bodyMix); osc3.connect(bodyMix);
+    bodyMix.connect(lp).connect(amp).connect(mainGain);
+    noise.connect(noiseHP).connect(noiseGain).connect(amp);
+
+    osc1.start(t0); osc2.start(t0); osc3.start(t0);
+    const stopT = t0 + ev.dur + r + 0.05;
+    osc1.stop(stopT); osc2.stop(stopT); osc3.stop(stopT);
+    noise.start(t0); noise.stop(t0 + noiseDur + 0.01);
+  }
+
+  // Offline piano-ish for WAV export
+  async function renderOfflinePianoish(events, sampleRate) {
     const maxT = events.reduce((m,e)=>Math.max(m, e.t + e.dur), 0) + 1.0;
-    const L = new Float32Array(Math.ceil(maxT * sampleRate));
-    const R = new Float32Array(L.length);
-    for (const ev of events) {
-      const f = 440 * Math.pow(2, (ev.midi - 69)/12);
-      const vel = ev.velocity/127;
-      const a = 0.002, d=0.04, s=0.7, r=0.08;
-      const t0 = Math.floor(ev.t * sampleRate);
-      const t1 = Math.floor((ev.t + ev.dur) * sampleRate);
-      for (let i = t0; i < Math.min(t1 + Math.floor(r*sampleRate), L.length); i++) {
-        const t = i / sampleRate - ev.t;
-        let env = 0;
-        if (t < a) env = t/a;
-        else if (t < a+d) env = 1 - (1-s) * ((t-a)/d);
-        else if (t < (ev.dur)) env = s;
-        else {
-          const tr = t - ev.dur;
-          env = s * Math.max(0, 1 - tr/r);
-        }
-        const x = Math.sin(2*Math.PI*f*(i/sampleRate)) * vel * env * 0.3;
-        L[i] += x;
-        R[i] += x;
+    const len = Math.ceil(maxT * sampleRate);
+    const L = new Float32Array(len), R = new Float32Array(len);
+
+    function renderNote(ev) {
+      const midi = Math.max(SAFE_LO, Math.min(SAFE_HI, ev.midi));
+      const vel = Math.max(0.05, ev.velocity/127);
+      const f0 = 440 * Math.pow(2, (midi - 69)/12);
+      const t0s = ev.t, r = 0.18;
+      const a = 0.003 + 0.002*(1-vel);
+      const peak = 0.22 * vel;
+      const i0 = Math.floor(t0s * sampleRate), iEnd = Math.min(len, Math.floor((ev.t + ev.dur + r + 0.05) * sampleRate));
+      const cutStart = 2200 * (0.7 + 0.6*vel), cutEnd = 1400;
+
+      if (!renderOfflinePianoish._state) renderOfflinePianoish._state = {l:0, r:0};
+      const st = renderOfflinePianoish._state;
+
+      for (let i = i0; i < iEnd; i++) {
+        const t = i / sampleRate - t0s;
+        let g = 0;
+        if (t < a) g = (t / a) * peak;
+        else if (t < Math.max(a, ev.dur*0.7)) g = peak * 0.92;
+        else if (t < ev.dur + r) {
+          const tr = t - Math.max(a, ev.dur*0.7);
+          const relLen = ev.dur + r - Math.max(a, ev.dur*0.7);
+          g = (peak * 0.92) * Math.max(0, 1 - tr / relLen);
+        } else g = 0;
+
+        const f = f0 * (t < 0.02 ? (1.002 - 0.002*(t/0.02)) : 1.0);
+        const ph = 2*Math.PI*f*(i/sampleRate);
+        const tri = (x)=> 2/Math.PI*Math.asin(Math.sin(x));
+        let s = (tri(ph) + tri(ph*0.997) + tri(ph*1.003)) / 3;
+
+        const cut = cutEnd + (cutStart - cutEnd) * Math.max(0, 1 - t / (ev.dur + r));
+        const rc = 1.0 / (2*Math.PI*Math.max(200, cut));
+        const dt = 1/sampleRate;
+        const alpha = dt / (rc + dt);
+        st.l += alpha * (s - st.l); st.r += alpha * (s - st.r);
+
+        const val = (st.l) * g;
+        const pan = 0.1;
+        L[i] += val * (1 - pan);
+        R[i] += val * (1 + pan);
       }
     }
-    // soft clip
-    for (let i=0;i<L.length;i++){ L[i]=Math.tanh(L[i]); R[i]=Math.tanh(R[i]); }
+
+    for (const ev of events) renderNote(ev);
+
+    const tiltCut = 9000, rc = 1.0 / (2*Math.PI*tiltCut), dt = 1/sampleRate, aLP = dt / (rc + dt);
+    let lpsL = 0, lpsR = 0;
+    for (let i=0;i<len;i++){ lpsL += aLP * (L[i] - lpsL); lpsR += aLP * (R[i] - lpsR); L[i] = Math.tanh(lpsL); R[i] = Math.tanh(lpsR); }
     return {L,R};
   }
 
-  // WAV encoder (16-bit PCM)
+  function normalizeBuffers(chans, ceiling=0.89) {
+    let peak = 0; for (const ch of chans) for (let i=0;i<ch.length;i++) peak = Math.max(peak, Math.abs(ch[i]));
+    if (peak > 0) { const g = Math.min(1, ceiling/peak); for (const ch of chans) for (let i=0;i<ch.length;i++) ch[i] *= g; }
+    return chans;
+  }
+
   function encodeWAV(channels, sampleRate) {
-    const numCh = channels.length;
-    const length = channels[0].length;
-    const bytesPerSample = 2;
+    const numCh = channels.length, length = channels[0].length, bytesPerSample = 2;
     const dataSize = length * numCh * bytesPerSample;
-    const buf = new ArrayBuffer(44 + dataSize);
-    const dv = new DataView(buf);
-    let p = 0;
+    const buf = new ArrayBuffer(44 + dataSize), dv = new DataView(buf); let p = 0;
     function wStr(s){ for(let i=0;i<s.length;i++) dv.setUint8(p++, s.charCodeAt(i)); }
-    function w16(v){ dv.setUint16(p, v, true); p+=2; }
-    function w32(v){ dv.setUint32(p, v, true); p+=4; }
-    wStr('RIFF'); w32(36 + dataSize); wStr('WAVE');
-    wStr('fmt '); w32(16); w16(1); w16(numCh); w32(sampleRate);
+    function w16(v){ dv.setUint16(p, v, true); p+=2; } function w32(v){ dv.setUint32(p, v, true); p+=4; }
+    wStr('RIFF'); w32(36 + dataSize); wStr('WAVE'); wStr('fmt '); w32(16); w16(1); w16(numCh); w32(sampleRate);
     w32(sampleRate * numCh * bytesPerSample); w16(numCh * bytesPerSample); w16(16);
     wStr('data'); w32(dataSize);
-    for (let i=0;i<length;i++) {
-      for (let ch=0; ch<numCh; ch++) {
-        const s = Math.max(-1, Math.min(1, channels[ch][i]));
-        dv.setInt16(p, s<0 ? s*0x8000 : s*0x7FFF, true); p+=2;
-      }
-    }
+    for (let i=0;i<length;i++) for (let ch=0; ch<numCh; ch++){ const s = Math.max(-1, Math.min(1, channels[ch][i])); dv.setInt16(p, s<0 ? s*0x8000 : s*0x7FFF, true); p+=2; }
     return new Uint8Array(buf);
   }
 
-  // Handle clicks to add notes (simple composition input)
+  // Click to add a note
   $roll.addEventListener('mousedown', (e) => {
     if (!audioCtx) startAudio();
     const rect = $roll.getBoundingClientRect();
-    const y = e.clientY - rect.top;
-    const x = e.clientX - rect.left;
-    const midi = Math.max(NOTE_MIN, Math.min(NOTE_MAX, NOTE_MAX - Math.floor((y / $roll.clientHeight) * NUM_KEYS)));
+    const y = e.clientY - rect.top, x = e.clientX - rect.left;
+    const midiRaw = Math.max(NOTE_MIN, Math.min(NOTE_MAX, NOTE_MAX - Math.floor((y / $roll.clientHeight) * NUM_KEYS)));
+    const midi = Math.max(SAFE_LO, Math.min(SAFE_HI, midiRaw));
     const tNow = isPlaying ? audioCtx.currentTime - startTime : songPos;
     const pxPerSec = 120;
     const t = tNow - ($roll.clientWidth - x) / pxPerSec;
-    const vel = Math.floor(40 + 87 * rng());
-    const dur = Math.max(0.1, 0.2 + 0.8 * rng());
+    const vel = Math.floor(50 + 70 * rng());
+    const dur = Math.max(0.12, 0.2 + 0.7 * rng());
     addNote(t, midi, vel, dur, true);
   });
 
   function addNote(t, midi, velocity, dur, playNow=false) {
     if (t < 0) return;
+    midi = Math.max(SAFE_LO, Math.min(SAFE_HI, midi));
     const ev = {t, midi, velocity, dur};
     noteEvents.push(ev);
-    recentNotes.push(ev);
-    const cutoff = Math.max(0, (isPlaying && audioCtx ? audioCtx.currentTime - startTime : songPos) - 2.2);
-    while (recentNotes.length && recentNotes[0].t + recentNotes[0].dur < cutoff) recentNotes.shift();
-    if (playNow && isPlaying) {
-      scheduleTone(ev);
-    }
+    if (playNow && isPlaying) scheduleTone(ev);
   }
 
-  // Simple local synth scheduling (placeholder for model output playout)
-  function scheduleTone(ev) {
-    if (!audioCtx) return;
-    const t0 = ev.t + startTime;
-    const f = 440 * Math.pow(2, (ev.midi - 69)/12);
-    const osc = audioCtx.createOscillator();
-    const g = audioCtx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(f, t0);
-    const vel = ev.velocity/127;
-    const a = 0.002, d=0.04, s=0.7, r=0.08;
-    g.gain.setValueAtTime(0, t0);
-    g.gain.linearRampToValueAtTime(vel*0.3, t0+a);
-    g.gain.linearRampToValueAtTime(vel*0.3*s, t0+a+d);
-    g.gain.setValueAtTime(vel*0.3*s, t0 + ev.dur);
-    g.gain.linearRampToValueAtTime(0, t0 + ev.dur + r);
-    osc.connect(g).connect(mainGain);
-    osc.start(t0);
-    osc.stop(t0 + ev.dur + r + 0.02);
-  }
-
-  // Worker setup
+  // Worker (inline via Blob)
   function createWorker() {
     const code = `
       'use strict';
-      let wasm = null;
-      let modelReady = false;
-      let bpm = 120;
-      let scale = [0,2,4,5,7,9,11]; // default major
-      let valence = 0.6, arousal = 0.5;
-      let mutateBoost = 0;
-      // Placeholder: load WASM WaveNet with SIMD
-      async function loadModel() {
-        // Replace URLs with actual .wasm/.bin paths or embed as base64
-        // Example: const resp = await fetch('wavenet_simd.wasm');
-        // wasm = await WebAssembly.instantiateStreaming(resp, imports);
-        // For now, simulate init delay
-        await new Promise(r=>setTimeout(r, 200));
-        modelReady = true;
-        postMessage({type:'ready'});
-      }
+      let modelReady = false, bpm = 120, valence = 0.6, arousal = 0.5;
+      let scale = [0,2,4,5,7,9,11], mutateBoost = 0;
+
+      async function loadModel(){ await new Promise(r=>setTimeout(r, 200)); modelReady = true; postMessage({type:'ready'}); }
       loadModel();
 
-      function quantizeToScale(midi) {
-        const pc = midi % 12;
-        let best = midi;
-        let bestDist = 12;
-        for (let k of scale) {
-          const dist = Math.min((pc - k + 12) % 12, (k - pc + 12) % 12);
-          if (dist < bestDist) { bestDist = dist; best = midi + (((k - pc + 12) % 12)); }
-        }
-        return best;
-      }
-
-      onmessage = async (e) => {
-        const msg = e.data;
-        if (msg.type === 'tempo') { bpm = msg.bpm; }
-        else if (msg.type === 'key') {
+      onmessage = (e) => {
+        const m = e.data;
+        if (m.type === 'tempo') bpm = m.bpm;
+        else if (m.type === 'key') {
           const map = {C:0,'C#':1,D:2,'D#':3,E:4,F:5,'F#':6,G:7,'G#':8,A:9,'A#':10,B:11};
-          const root = map[msg.key]||0;
-          const maj = [0,2,4,5,7,9,11];
-          const min = [0,2,3,5,7,8,10];
-          const scl = (valence>=0.5?maj:min).map(s=>(s+root)%12);
-          scale = scl;
-        }
-        else if (msg.type === 'mood') { valence = msg.valence; arousal = msg.arousal; }
-        else if (msg.type === 'evolve') { mutateBoost = 1; setTimeout(()=>{ mutateBoost = 0; }, 2000); }
-        else if (msg.type === 'generate') {
+          const root = map[m.key]||0;
+          const maj=[0,2,4,5,7,9,11], min=[0,2,3,5,7,8,10];
+          scale = (valence>=0.5?maj:min).map(s=>(s+root)%12);
+        } else if (m.type === 'mood') { valence=m.valence; arousal=m.arousal; }
+        else if (m.type === 'evolve') { mutateBoost = 1; setTimeout(()=>mutateBoost=0, 2000); }
+        else if (m.type === 'generate') {
           if (!modelReady) return;
-          // Use seedNotes and reqDur to run inference. Placeholder: generate a few notes procedurally.
-          const seed = msg.seedNotes || [];
-          const req = msg.reqDur || 0.3;
-          const density = 2 + Math.floor(3 * (arousal)); // notes per beat approx
-          const tempo = bpm;
-          const beat = 60/tempo;
+          const seed = m.seedNotes || [];
+          const req = m.reqDur || 0.3;
+          const beat = 60/Math.max(40,Math.min(220,bpm));
+          const density = 1 + Math.floor(2 * (0.3 + 0.7*arousal));
           const n = Math.max(1, Math.floor((req/beat) * density));
-          const out = [];
-          const baseT = msg.tNow;
+          const out = [], baseT = m.tNow;
+
+          function quantizeToScale(mid){
+            const pc = ((mid%12)+12)%12; let best = mid, bestDist = 12;
+            for (let k of scale) {
+              const dist = Math.min((pc - k + 12) % 12, (k - pc + 12) % 12);
+              if (dist < bestDist) { bestDist = dist; best = mid + (((k - pc + 12) % 12)); }
+            }
+            return best;
+          }
+
           for (let i=0;i<n;i++) {
             const dt = (i / n) * req;
-            // pick pitch near last seed or random in range
-            let midi = 60 + Math.floor((Math.random()-0.5)*12);
+            let midi;
             if (seed.length) {
               const last = seed[seed.length-1].midi;
-              midi = last + Math.floor((Math.random()-0.5)*7);
+              const steps = [-2,-1,0,1,2, (Math.random()<0.2?3:0), (Math.random()<0.2?-3:0)];
+              midi = last + steps[Math.floor(Math.random()*steps.length)];
+            } else {
+              midi = 66 + Math.floor((Math.random()-0.5)*6);
             }
-            midi = Math.max(21, Math.min(108, midi));
+            const LO=48, HI=84;
+            midi = Math.max(LO, Math.min(HI, midi));
             midi = quantizeToScale(midi);
-            const vel = Math.floor(50 + 60*Math.random() + 20*mutateBoost*Math.random());
-            const dur = Math.max(0.12, beat * (0.25 + 0.5*Math.random()));
-            out.push({t: baseT + dt, midi, velocity: Math.min(127, vel), dur});
+            const vel = Math.min(127, Math.max(50, Math.floor(60 + 50*Math.random() + 15*mutateBoost*Math.random())));
+            const dur = Math.max(0.12, beat * (0.25 + 0.4*Math.random()));
+            out.push({t: baseT + dt, midi, velocity: vel, dur});
           }
-          // WaveNet audio generation would produce PCM here; for now only symbolic events
           postMessage({type:'notes', notes: out});
         }
       };
@@ -535,27 +425,19 @@
 
     worker.onmessage = (e) => {
       const msg = e.data;
-      if (msg.type === 'ready') {
-        modelReady = true;
-        $status.textContent = 'Model ready';
-      } else if (msg.type === 'notes') {
+      if (msg.type === 'ready') { modelReady = true; $status.textContent = 'Model ready'; }
+      else if (msg.type === 'notes') {
         genScheduled = false;
-        // Append and schedule
-        for (const ev of msg.notes) {
-          addNote(ev.t, ev.midi, ev.velocity, ev.dur, true);
-        }
-        // Immediately request next small chunk for continuity
+        for (const ev of msg.notes) addNote(ev.t, ev.midi, ev.velocity, ev.dur, true);
         tickGenerate();
       }
     };
   }
 
-  function postCtrl(obj) {
-    if (worker) worker.postMessage(obj);
-  }
+  function postCtrl(obj){ if (worker) worker.postMessage(obj); }
 
   // Init
-  function init() {
+  function init(){
     resizeCanvas();
     requestAnimationFrame(draw);
     createWorker();
@@ -566,13 +448,12 @@
   }
   init();
 
-  // Security headers hint for best performance:
   // Serve with:
   // Cross-Origin-Opener-Policy: same-origin
   // Cross-Origin-Embedder-Policy: require-corp
-  // To enable SharedArrayBuffer and WASM SIMD in Chrome.
-
+  // to enable SAB + WASM SIMD for a real WaveNet.
 })();
 </script>
 </body>
 </html>
+```
