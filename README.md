@@ -24,7 +24,7 @@ The core idea is to provide an LLM with a high-level concept or a set of core fe
 
 A live, unified demo of all projects is available via GitHub Pages:
 
-**[View All Projects](https://juliabaris.github.io/ai-projects/)**
+**[View All Projects](https://juliusbrussee.github.io/ai-projects/)**
 
 ## Projects
 
